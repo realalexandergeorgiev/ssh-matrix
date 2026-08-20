@@ -357,13 +357,22 @@ verifizieren (Trockenlauf).
 | Symptom | Ursache / Lösung |
 |---|---|
 | `source_unreachable` für alle Ziele einer Quelle | Kali → A fehlgeschlagen: IP/PORT/User/Passwort prüfen. A war vom Kali aus nicht erreichbar. |
-| `no_tool` | Auf A ist weder `sshpass`, `ssh`, `nc` noch `bash` vorhanden (sehr ungewöhnlich für Linux). |
+| `no_tool` | Auf A wurde kein `sshpass`/`ssh`/`nc`/`bash` erkannt. **Seit v1.1.1** schreibt das Skript in `run.log` eine WARNING mit der gekürzten Probe-Ausgabe → dort nachsehen. Wenn die Probe leer ist (z. B. `channel closed`), war es ein transientes Erkennungsproblem und kein echtes `no_tool` — der nächste Lauf (`--resume`) versucht es erneut. |
+| Lauf „hängt" / „Tools" erscheint erst nach Ctrl+C | Seit v1.1.1 behoben: `exec_command` ist auf 30 s begrenzt, tote Verbindungen werden per Keepalive erkannt, und Ctrl+C beendet sofort (Exit 130, Ergebnisse bleiben erhalten). |
 | `auth_fail` | Port offen, aber Login mit dem übergebenen Passwort abgelehnt. |
 | `unclear` | Nur beim Port-Fallback (Rang 3/4): nicht unterscheidbar, ob Port zu oder gefiltert. |
 | `ERR` mit leerer `error`-Spalte | Verbindung zu A tot – Skript reconnectet automatisch; andernfalls `--resume` nach Laufende. |
 | Viele `UNREACH` | Firewalls zwischen den Netzen – ggf. relevantes Ergebnis selbst. |
 | fail2ban/Rate-Limit | Lauf mit weniger `--workers`, `--per-source 1`, größerem `--timeout`; am Ende `--resume`. |
 | `run.log` | Detailliertes Laufprotokoll in `ssh_matrix_out/run.log` (Tool-Erkennung, Reconnects, Warnungen). |
+
+**Status-Bedeutung (OK / AUTH / NOTOOL):** `OK` = voller SSH-Login A→B
+erfolgreich. `AUTH` = SSH-Port offen, Login abgelehnt. `NOTOOL` = **kein Test
+durchgeführt** (kein Werkzeug auf Quelle A erkannt — kein Ergebnis über B!).
+Der `OK`-Zähler im Fortschrittsbalken zählt nur A→B-Paare **dieses Laufs**;
+die grünen „Quelle verbunden"-Zeilen (Kali→A) zählen nicht. Bei
+`--subnet-quota` werden nach erreichter Quota weitere Paare als `SKIP`
+übersprungen — OK bleibt dann bewusst klein.
 
 ---
 

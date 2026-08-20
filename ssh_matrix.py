@@ -22,7 +22,6 @@ Beide Richtungen entstehen automatisch, weil alle geordneten Paare
 """
 
 import argparse
-import base64
 import csv
 import ipaddress
 import logging
@@ -321,6 +320,11 @@ class SourceTester:
                     allow_agent=False,
                     look_for_keys=False,
                 )
+                transport = client.get_transport()
+                if transport is not None:
+                    # Tote/halboffene Verbindungen werden erkannt statt
+                    # unbegrenzt zu haengen.
+                    transport.set_keepalive(10)
                 self.client = client
                 return True, ""
             except (socket.timeout, paramiko.AuthenticationException,
@@ -361,10 +365,37 @@ class SourceTester:
         except Exception as exc:
             return "", str(exc), -1
         chan.settimeout(1)
-        try:
-            chan.exec_command(cmd)
-        except Exception as exc:
-            return "", str(exc), -1
+
+        # exec_command blockiert in paramiko 2.12 UNBEGRENZT
+        # (_wait_for_event -> event.wait() ohne Timeout). Daher exec in einem
+        # Helper-Thread mit join-Timeout ausfuehren, damit ein haengender
+        # Server den Worker nicht dauerhaft blockiert.
+        exec_err: list = []
+        exec_done = threading.Event()
+
+        def _exec():
+            try:
+                chan.exec_command(cmd)
+            except Exception as exc:
+                exec_err.append(exc)
+            finally:
+                exec_done.set()
+
+        t = threading.Thread(target=_exec, daemon=True)
+        t.start()
+        if not exec_done.wait(timeout=30):
+            try:
+                chan.close()
+            except Exception:
+                pass
+            return "", "exec_command timeout (keine Antwort vom Server)", -1
+        if exec_err:
+            try:
+                chan.close()
+            except Exception:
+                pass
+            return "", str(exec_err[0]), -1
+
         out: list = []
         err: list = []
         deadline = time.monotonic() + timeout
@@ -388,22 +419,34 @@ class SourceTester:
                 exited = True
                 break
             time.sleep(0.05)
+
+        # Nach Exit bis EOF lesen (Grace-Fenster, Timeouts werden toleriert
+        # statt sofort abzubrechen - verhindert Verlust von Rest-Ausgabe).
+        drain_deadline = time.monotonic() + 2.0
         while True:
             try:
                 data = chan.recv(65536)
             except Exception:
-                break
+                if time.monotonic() > drain_deadline:
+                    break
+                time.sleep(0.1)
+                continue
             if not data:
                 break
             out.append(data.decode("utf-8", "replace"))
+        drain_deadline = time.monotonic() + 2.0
         while True:
             try:
                 data = chan.recv_stderr(65536)
             except Exception:
-                break
+                if time.monotonic() > drain_deadline:
+                    break
+                time.sleep(0.1)
+                continue
             if not data:
                 break
             err.append(data.decode("utf-8", "replace"))
+
         if exited:
             try:
                 rc = chan.recv_exit_status()
@@ -426,9 +469,22 @@ class SourceTester:
             f"command -v {t} >/dev/null 2>&1 && echo HAVE:{t}" for t in TOOL_PROBE.split()
         )
         probe += "; ssh -V 2>&1"
-        out, err, _rc = self.run(probe, 15)
-        text = out + "\n" + err
-        self.tools = {name: (f"HAVE:{name}" in text) for name in TOOL_PROBE.split()}
+        text = ""
+        for _attempt in (1, 2, 3):
+            out, err, _rc = self.run(probe, 15)
+            text = out + "\n" + err
+            if any(line.startswith("HAVE:") for line in text.splitlines()):
+                break
+            time.sleep(0.5)
+        if not any(line.startswith("HAVE:") for line in text.splitlines()):
+            # Fehlgeschlagene Erkennung NICHT cachen -> naechster Test
+            # versucht es erneut. WARNING ins run.log fuer Diagnose.
+            logging.getLogger("ssh_matrix").warning(
+                "Tool-Erkennung auf %s:%s ohne Ergebnis (Probe-Ausgabe: %.160r)",
+                self.src["ip"], self.src["port"], text[:160])
+            return {}
+        lines = text.splitlines()
+        self.tools = {name: (f"HAVE:{name}" in lines) for name in TOOL_PROBE.split()}
         m = re.search(r"OpenSSH[_-](\d+)\.(\d+)", text)
         self.ssh_askpass_force = bool(m) and (int(m.group(1)), int(m.group(2))) >= (8, 4)
         return self.tools
@@ -436,16 +492,16 @@ class SourceTester:
     def _ensure_askpass(self) -> str | None:
         """Askpass-Skript auf A anlegen (liest Passwort aus Env __AP, enthaelt
         es NICHT selbst). /tmp bevorzugt, /dev/shm als Fallback. Wird in
-        cleanup() entfernt."""
+        cleanup() entfernt. Anlegen per printf (POSIX) - keine base64-
+        Abhaengigkeit."""
         if self.askpass_path:
             return self.askpass_path
         content = "#!/bin/sh\nprintf '%s\\n' \"$__AP\"\n"
-        b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
         suffix = f"{self.src['ip'].replace('.', '_')}_{secrets.token_hex(3)}"
         for base in ("/tmp", "/dev/shm"):
             path = f"{base}/.apm_{suffix}"
             cmd = (
-                f"echo {shlex.quote(b64)} | base64 -d > {shlex.quote(path)} "
+                f"printf %s {shlex.quote(content)} > {shlex.quote(path)} "
                 f"&& chmod 700 {shlex.quote(path)} "
                 f"&& __AP=x {shlex.quote(path)} >/dev/null 2>&1 && echo EXEC_OK"
             )
@@ -485,7 +541,7 @@ class SourceTester:
         if tools.get("sshpass"):
             return "sshpass", f"sshpass -p {shlex.quote(self.password)} {ssh_cmd}"
 
-        if tools.get("ssh") and tools.get("setsid"):
+        if tools.get("ssh"):
             script = self._ensure_askpass()
             if script:
                 env = (
@@ -494,7 +550,11 @@ class SourceTester:
                 )
                 if self.ssh_askpass_force:
                     env += " SSH_ASKPASS_REQUIRE=force"
-                return "askpass", f"{env} setsid {ssh_cmd} < /dev/null 2>&1"
+                # setsid nur wenn vorhanden: paramiko-exec hat kein TTY, der
+                # askpass-Trick funktioniert auch ohne.
+                if tools.get("setsid"):
+                    return "askpass", f"{env} setsid {ssh_cmd} < /dev/null 2>&1"
+                return "askpass", f"{env} {ssh_cmd} < /dev/null 2>&1"
 
         if tools.get("nc"):
             return "port_nc", f"nc -z -w {self.timeout} {host} {port}; echo RC=$?"
@@ -972,23 +1032,30 @@ def main():
              len(tasks), args.workers, args.timeout, args.per_source)
 
     started = time.monotonic()
+    ex = ThreadPoolExecutor(max_workers=args.workers)
     try:
-        with ThreadPoolExecutor(max_workers=args.workers) as ex:
-            futures = {ex.submit(worker, s, t, args, password, writer, lock,
-                                 progress, direction_working, quota_statuses,
-                                 log): s for s, t in tasks}
-            for fut in as_completed(futures):
-                try:
-                    fut.result()
-                except Exception as exc:
-                    log.exception("Worker-Fehler fuer Quelle %s", futures[fut])
+        futures = {ex.submit(worker, s, t, args, password, writer, lock,
+                             progress, direction_working, quota_statuses,
+                             log): s for s, t in tasks}
+        for fut in as_completed(futures):
+            try:
+                fut.result()
+            except Exception as exc:
+                log.exception("Worker-Fehler fuer Quelle %s", futures[fut])
     except KeyboardInterrupt:
+        # Sofort beenden OHNE auf haengende Worker zu warten
+        # (shutdown(wait=True) bzw. Interpreter-Exit wuerde blockieren).
         log.warning("Abbruch durch Benutzer - bereits geschriebene Ergebnisse bleiben erhalten "
                     "(Resume mit --resume moeglich)")
-        csvf.flush()
-        csvf.close()
-        progress.close()
-        sys.exit(130)
+        try:
+            csvf.flush()
+            csvf.close()
+            progress.close()
+        except Exception:
+            pass
+        os._exit(130)
+    finally:
+        ex.shutdown(wait=True)
 
     csvf.close()
     progress.close()

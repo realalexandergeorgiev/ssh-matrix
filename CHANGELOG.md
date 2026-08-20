@@ -5,6 +5,43 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v1.1.1] (2026-08-20) — Hängende Worker & NOTOOL-Fehldiagnose behoben
+
+### Behoben
+- **`run()` hing unbegrenzt**: `chan.exec_command()` blockiert in paramiko 2.12
+  ohne Timeout (`_wait_for_event` → `event.wait()`). Wenn der Server nicht
+  antwortete, hing der Worker für immer und belegte einen Thread-Pool-Slot.
+  Jetzt wird `exec_command` in einem Helper-Thread mit `join(timeout=30)`
+  ausgeführt; bei Timeout wird der Kanal geschlossen und `exec_command timeout`
+  zurückgegeben.
+- **Ctrl+C hing ebenfalls**: Der `ThreadPoolExecutor`-Kontextmanager wartete
+  beim Verlassen auf alle laufenden Futures (`shutdown(wait=True)`). Der
+  KeyboardInterrupt-Handler beendet jetzt sofort per `os._exit(130)`
+  (CSV/Progress werden vorher geflusht). Kein Warten auf hängende Worker mehr.
+- **NOTOOL-Fehldiagnose**: Eine transient fehlgeschlagene Tool-Erkennung
+  (leere Probe-Ausgabe, z. B. `Channel closed` unter Last) wurde **dauerhaft
+  gecacht** → alle Ziele der Quelle wurden fälschlich `NOTOOL`.
+  - Probe wird jetzt bis zu 3× wiederholt.
+  - Fehlgeschlagene Erkennung wird **nicht mehr gecacht** (nächster Test
+    probiert erneut).
+  - **WARNING ins `run.log`** mit gekürzter Probe-Ausgabe, wenn keine Tools
+    erkannt wurden → NOTOOL sofort diagnostizierbar.
+- **`setsid`-Zwang entfernt**: Der askpass-Pfad (voller SSH-Login) erforderte
+  `ssh` **und** `setsid`. Minimal-Systeme/Appliances mit `ssh` (dropbear)
+  aber ohne `setsid`/`nc`/`bash` landeten fälschlich bei `NOTOOL`. Da
+  paramiko-`exec_command` kein TTY hat, funktioniert der SSH_ASKPASS-Trick
+  auch ohne `setsid` (nur optional vorangestellt, wenn vorhanden).
+- **`base64`-Abhängigkeit entfernt**: Das askpass-Skript wird jetzt per
+  `printf %s` angelegt (POSIX) statt `base64 -d` — kein base64 auf den
+  Zielen mehr nötig.
+- **Exaktes Zeilen-Matching in der Tool-Erkennung**: `"HAVE:ssh" in text`
+  matchte auch `"HAVE:sshpass"` (Substring-False-Positive). Jetzt
+  zeilenbasiert (`f"HAVE:{name}" in text.splitlines()`).
+- **Drain-Loops in `run()`**: Lesen bis EOF mit Grace-Fenster statt
+  sofortigem Abbruch bei Timeout — verhindert Verlust von Rest-Ausgabe.
+- **Transport-Keepalive**: `transport.set_keepalive(10)` nach dem Verbinden —
+  tote/halboffene Verbindungen werden erkannt statt unbegrenzt zu hängen.
+
 ## [v1.1.0] (2026-08-20) — Quota-Modus wählbar
 
 ### Hinzugefügt
@@ -138,6 +175,7 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   `StrictHostKeyChecking=no`, keine known_hosts-Verschmutzung,
   Temp-Dateien auf Zielen sofort gelöscht
 
+[v1.1.1]: ./README.md
 [v1.1.0]: ./README.md
 [v1.0.0]: ./README.md
 [v0.5.0]: ./README.md

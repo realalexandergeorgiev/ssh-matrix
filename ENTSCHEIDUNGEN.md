@@ -204,3 +204,36 @@ nicht zur öffentlichen Veröffentlichung vorgesehen.
 **Begründung:** Ohne Lizenz gilt standardmäßig „Alle Rechte vorbehalten" —
 für interne Nutzung ausreichend. Falls doch veröffentlicht werden soll,
 wäre eine Lizenz (z. B. MIT) nachzutragen.
+
+---
+
+## 14. Robustheit gegen hängende Worker & fehlerhafte Tool-Erkennung (v1.1.1)
+
+**Entscheidung:**
+- `exec_command` wird in einem Helper-Thread mit `join(timeout=30)`
+  ausgeführt, statt direkt aufzurufen. Hintergrund: paramiko 2.12 blockiert
+  in `exec_command` → `_wait_for_event()` → `event.wait()` **ohne Timeout** —
+  ein nicht antwortender Server hätte den Worker (und damit einen
+  Thread-Pool-Slot) dauerhaft blockiert.
+- Der `KeyboardInterrupt`-Handler beendet per `os._exit(130)` nach dem
+  Flushen von CSV/Progress. Hintergrund: `ThreadPoolExecutor.shutdown(wait=True)`
+  und der Interpreter-Exit warten auf **alle** laufenden (ggf. hängenden)
+  Nicht-Daemon-Worker-Threads — Ctrl+C hätte sonst ebenfalls gehängt.
+- Nach dem Verbinden wird `transport.set_keepalive(10)` gesetzt, damit
+  tote/halboffene Verbindungen erkannt werden.
+- Die Tool-Erkennung wird bei leerer Probe **bis zu 3× wiederholt** und eine
+  fehlgeschlagene Erkennung **nicht gecacht** (sonst wurden alle Ziele einer
+  Quelle dauerhaft `NOTOOL`, wenn die Probe einmal transient fehlschlug).
+  Zusätzlich WARNING mit Probe-Ausgabe ins `run.log`.
+- Der askpass-Pfad verlangt **kein `setsid`** mehr (nur optional): paramiko-
+  `exec_command` hat kein TTY, der SSH_ASKPASS-Trick funktioniert auch ohne;
+  Minimal-Systeme mit `ssh` (dropbear) aber ohne `setsid`/`nc`/`bash` landeten
+  sonst fälschlich bei `NOTOOL`. Ebenso wird das askpass-Skript per `printf`
+  (POSIX) statt `base64 -d` angelegt — eine Abhängigkeit weniger auf den
+  Zielen.
+
+**Begründung:** Diese Kombination beseitigt zwei beobachtete Symptome:
+(1) Lauf schien zu hängen, „verbunden, Tools:" erschien erst nach Ctrl+C
+(hängende exec + wartender Executor-Shutdown); (2) häufiges `NOTOOL` trotz
+vorhandener Werkzeuge (transiente Erkennungsfehler wurden permanent gecacht
+bzw. `setsid`/`base64` wurden überzogen vorausgesetzt).
