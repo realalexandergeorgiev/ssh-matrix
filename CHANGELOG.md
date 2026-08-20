@@ -41,6 +41,10 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   sofortigem Abbruch bei Timeout — verhindert Verlust von Rest-Ausgabe.
 - **Transport-Keepalive**: `transport.set_keepalive(10)` nach dem Verbinden —
   tote/halboffene Verbindungen werden erkannt statt unbegrenzt zu hängen.
+- **Batch-Progress für unerreichbare Quellen**: Die Massenmarkierung
+  (`source_unreachable`/`skipped`) aller Ziele einer Quelle aktualisiert den
+  Fortschrittsbalken jetzt als **einen Sprung** pro Status statt 219× +1 —
+  die Anzeige zeigt sofort den Gesamtbetrag des Bursts.
 
 ## [v1.1.0] (2026-08-20) — Quota-Modus wählbar
 

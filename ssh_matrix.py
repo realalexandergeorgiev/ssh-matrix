@@ -781,16 +781,23 @@ def worker(src, targets, args, password, writer, lock, progress,
     ok, err = tester.connect()
     if not ok:
         with lock:
+            n_skipped = 0
+            n_srcerr = 0
             for tgt in targets:
                 if args.subnet_quota > 0:
                     direction = (src["net"], tgt["net"])
                     if len(direction_working[direction]) >= args.subnet_quota:
                         writer.writerow(make_row(src, tgt, "quota_skip", "skipped", 0, ""))
-                        progress.update(1, instant=True, status="skipped")
+                        n_skipped += 1
                         continue
                 writer.writerow(make_row(src, tgt, "connect", "source_unreachable", 0, err))
-                progress.update(1, instant=True, status="source_unreachable")
+                n_srcerr += 1
             writer.flush()
+            # Batch-Update: ein Sprung pro Status statt 219x +1
+            if n_skipped:
+                progress.update(n_skipped, instant=True, status="skipped")
+            if n_srcerr:
+                progress.update(n_srcerr, instant=True, status="source_unreachable")
         log.warning("Quelle %s:%s nicht erreichbar: %s", src["ip"], src["port"], err)
         return (src["ip"], src["port"]), len(targets), 0
 
