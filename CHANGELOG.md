@@ -5,6 +5,15 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v1.2.5] (2026-08-20) — Ctrl+C im Pause-Menü korrigiert
+
+### Behoben
+- Ein einzelnes Ctrl+C **im Pause-Menü** brach bisher sofort hart ab
+  („Hart abgebrochen.", Exit 130) — obwohl der Nutzer nur wieder ins
+  Menü wollte. Jetzt zeigt das erste Ctrl+C im Menü nur einen Hinweis
+  und lässt das Menü offen; erst **2× Ctrl+C hintereinander** bricht
+  hart ab (Exit 130). Jede normale Eingabe setzt den Zähler zurück.
+
 ## [v1.2.4] (2026-08-20) — Verbosity im Pause-Menü
 
 ### Hinzugefügt
@@ -260,6 +269,7 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   `StrictHostKeyChecking=no`, keine known_hosts-Verschmutzung,
   Temp-Dateien auf Zielen sofort gelöscht
 
+[v1.2.5]: ./README.md
 [v1.2.4]: ./README.md
 [v1.2.3]: ./README.md
 [v1.2.2]: ./README.md

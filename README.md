@@ -114,7 +114,9 @@ Live-Zähler im Fortschrittsbalken (z. B. `OK:123 AUTH:5 UNREACH:3`).
 ### Pause-Menü zur Laufzeit (1× Ctrl+C)
 
 Während des Laufs öffnet **1× Ctrl+C** ein interaktives Menü (die Worker
-laufen weiter; 2× Ctrl+C bricht hart ab, Exit 130):
+laufen weiter). Im Menü selbst zeigt **1× Ctrl+C** nur einen Hinweis und
+lässt das Menü offen — erst **2× Ctrl+C hintereinander** bricht hart ab
+(Exit 130):
 
 ```
 === Pause-Menue ===
@@ -126,6 +128,7 @@ laufen weiter; 2× Ctrl+C bricht hart ab, Exit 130):
   m M   Quota-Modus auth_ok|reachable (aktuell auth_ok)
   v L   Verbosity err|warn|info (aktuell info)
   c     Weiter
+  ctrl-c  1x Hinweis / 2x hintereinander = hart abbrechen (Exit 130)
 menu>
 ```
 

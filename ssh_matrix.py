@@ -62,7 +62,7 @@ KNOWN_STATUSES = {
 RETRY_ALL_EXCLUDE = {"auth_ok", "skipped"}
 SUCCESS_STATUSES = {"auth_ok"}
 
-VERSION = "v1.2.4"
+VERSION = "v1.2.5"
 AUTHOR = "Alex & DeepSeek"
 
 # RAM-Warnschwelle in MB (per env ueberschreibbar, z.B. fuer Tests).
@@ -1186,13 +1186,22 @@ def show_menu(config, progress, direction_working, work_queue, stop_event,
         print(f"  {paint(C_GREEN, 'm M')}   Quota-Modus auth_ok|reachable (aktuell {config.quota_mode})", file=sys.stderr)
         print(f"  {paint(C_GREEN, 'v L')}   Verbosity err|warn|info (aktuell {config.verbose_level})", file=sys.stderr)
         print(f"  {paint(C_GREEN, 'c')}     Weiter", file=sys.stderr)
-        print("  ctrl-c  Hart abbrechen (Exit 130)", file=sys.stderr)
+        print("  ctrl-c  1x Hinweis / 2x hintereinander = hart abbrechen (Exit 130)", file=sys.stderr)
+        ci_count = 0
         while True:
             try:
                 cmd = input("menu> ").strip()
             except KeyboardInterrupt:
-                print("Hart abgebrochen.", file=sys.stderr)
-                os._exit(130)
+                # 1x Ctrl+C im Menue: nur Hinweis, Menue bleibt offen.
+                # 2x hintereinander: harter Abbruch (Exit 130).
+                ci_count += 1
+                if ci_count >= 2:
+                    print("Hart abgebrochen.", file=sys.stderr)
+                    os._exit(130)
+                print("Hinweis: 's' = Stop, 'c' = Weiter. "
+                      "Nochmal Ctrl+C bricht hart ab.", file=sys.stderr)
+                continue
+            ci_count = 0
             if not cmd:
                 continue
             parts = cmd.split()
