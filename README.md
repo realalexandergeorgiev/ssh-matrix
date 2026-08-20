@@ -207,6 +207,7 @@ A auf A's Port; von A aus wird B auf B's Port getestet (`ssh -p <B_port>`).
 | `--user USER` | – (Pflicht) | SSH-User, gilt für alle IPs |
 | `--pass-env NAME` | `SSHPASS` | Env-Variable mit Passwort (empfohlen) |
 | `--pass-file FILE` | – | Datei, 1. Zeile = Passwort (Alternative) |
+| `--verbose LEVEL` | `info` | Detailgrad der Terminal-Ausgabe: `err` (nur Fehler), `warn` (Fehler + Warnungen), `info` (alles). `run.log` bleibt immer vollständig — nützlich, wenn Log-Zeilen das Pause-Menü stören. |
 | `--port-default N` | `22` | Default-Port für Einträge ohne `:PORT` |
 | `--workers N` | `20` | Parallele Quell-IPs |
 | `--timeout N` | `10` | Timeout je Hop (Connect/Auth/Befehl) in s |

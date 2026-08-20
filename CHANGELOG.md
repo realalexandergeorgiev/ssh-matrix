@@ -5,6 +5,17 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v1.2.2] (2026-08-20) — Optionaler Log-Detailgrad (--verbose)
+
+### Hinzugefügt
+- Neues Flag `--verbose {err,warn,info}` (Default `info`): steuert den
+  Detailgrad der Terminal-Ausgabe (stderr). `err` = nur Fehler, `warn` =
+  Fehler + Warnungen, `info` = alles.
+- `run.log` bleibt **immer vollständig** (INFO) — Diagnose unabhängig von
+  der Terminal-Einstellung.
+- Sinnvoll, wenn Warn-/Info-Zeilen das Pause-Menü stören: mit
+  `--verbose err` bleibt das Menü ungestört.
+
 ## [v1.2.1] (2026-08-20) — Versions-Banner
 
 ### Hinzugefügt
@@ -210,6 +221,7 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   `StrictHostKeyChecking=no`, keine known_hosts-Verschmutzung,
   Temp-Dateien auf Zielen sofort gelöscht
 
+[v1.2.2]: ./README.md
 [v1.2.1]: ./README.md
 [v1.2.0]: ./README.md
 [v1.1.1]: ./README.md

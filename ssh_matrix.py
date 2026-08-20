@@ -62,7 +62,7 @@ KNOWN_STATUSES = {
 RETRY_ALL_EXCLUDE = {"auth_ok", "skipped"}
 SUCCESS_STATUSES = {"auth_ok"}
 
-VERSION = "v1.2.1"
+VERSION = "v1.2.2"
 AUTHOR = "Alex & DeepSeek"
 
 
@@ -1130,6 +1130,10 @@ def parse_args():
                     "per SSH-Login Ziel B erreichen kann (beide Richtungen).")
     ap.add_argument("--version", action="version",
                     version=f"%(prog)s {VERSION} (entwickelt von {AUTHOR})")
+    ap.add_argument("--verbose", choices=["err", "warn", "info"], default="info",
+                    help="Detailgrad der Terminal-Ausgabe (stderr): err = nur "
+                         "Fehler, warn = Fehler + Warnungen, info = alles "
+                         "(Default). run.log bleibt immer vollstaendig.")
     ap.add_argument("--ips", required=True,
                     help="Pfad zur IP-Liste (Format siehe README / ips.txt.example)")
     ap.add_argument("--user", required=True, help="SSH-User (gilt fuer alle IPs)")
@@ -1202,13 +1206,18 @@ def main():
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     fh = logging.FileHandler(os.path.join(args.out, "run.log"), encoding="utf-8")
     fh.setFormatter(fmt)
+    fh.setLevel(logging.INFO)  # run.log immer vollstaendig (Diagnose)
     sh = logging.StreamHandler(sys.stderr)
     sh.setFormatter(ColorFormatter("%(asctime)s %(levelname)s %(message)s"))
+    # --verbose steuert NUR die stderr-Ausgabe (nicht run.log)
+    sh.setLevel({"err": logging.ERROR, "warn": logging.WARNING,
+                 "info": logging.INFO}[args.verbose])
     log.addHandler(fh)
     log.addHandler(sh)
 
     print_banner()
-    log.info("SSH-Matrix-Tester %s - entwickelt von %s", VERSION, AUTHOR)
+    log.info("SSH-Matrix-Tester %s - entwickelt von %s (verbose=%s)",
+             VERSION, AUTHOR, args.verbose)
 
     hosts = parse_ips_file(args.ips, args.port_default, log)
     if not hosts:
