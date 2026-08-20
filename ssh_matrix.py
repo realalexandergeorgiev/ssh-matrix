@@ -63,6 +63,16 @@ KNOWN_STATUSES = {
 RETRY_ALL_EXCLUDE = {"auth_ok", "skipped"}
 SUCCESS_STATUSES = {"auth_ok"}
 
+# Quota-Modi: welche Testergebnisse zaehlen als "funktionierender Quell-Host"
+# fuer --subnet-quota.
+#   auth_ok   : nur voller SSH-Login
+#   reachable : Netzwerkseitig erreichbar (Login ok ODER Login abgelehnt ODER
+#               nur Port offen) - beweist, dass der Weg zum Ziel-Netz funktioniert
+QUOTA_MODES = {
+    "auth_ok": {"auth_ok"},
+    "reachable": {"auth_ok", "auth_fail", "port_open"},
+}
+
 # ------------------------------------------------------------ ANSI-Farben
 USE_COLOR = sys.stderr.isatty() and not os.environ.get("NO_COLOR")
 
@@ -706,7 +716,7 @@ def chunk_list(lst: list, n: int) -> list:
 
 
 def worker(src, targets, args, password, writer, lock, progress,
-           direction_working, log) -> tuple:
+           direction_working, quota_statuses, log) -> tuple:
     tester = SourceTester(src, args.user, password, args.timeout)
     ok, err = tester.connect()
     if not ok:
@@ -750,7 +760,7 @@ def worker(src, targets, args, password, writer, lock, progress,
                                      res["latency_ms"], res["error"]))
             writer.flush()
             progress.update(1, status=res["status"])
-            if args.subnet_quota > 0 and res["status"] == "auth_ok":
+            if args.subnet_quota > 0 and res["status"] in quota_statuses:
                 direction_working[(src["net"], tgt["net"])].add(src["ip"])
         if res["status"] == "tool_error" and not res["error"]:
             consec += 1
@@ -816,6 +826,11 @@ def parse_args():
                     help="Mindestanzahl erfolgreicher Quell-Hosts pro Richtung "
                          "(src_net -> tgt_net); danach Rest als 'skipped' "
                          "ueberspringen. 0 = aus (Default: 0)")
+    ap.add_argument("--quota-mode", choices=sorted(QUOTA_MODES), default="auth_ok",
+                    help="Was zaehlt als 'funktionierender Quell-Host' fuer "
+                         "--subnet-quota: auth_ok (nur voller Login, Default) "
+                         "oder reachable (netzwerkseitig erreichbar: auth_ok, "
+                         "auth_fail oder port_open)")
     ap.add_argument("--subnet-gap", type=int, default=16,
                     help="Luecken-Schwellwert fuer Subnetz-Clustering (Default: 16). "
                          "0 = feste /24 wie bisher")
@@ -865,9 +880,11 @@ def main():
     log.info("%d Endpunkte geladen, %d Subnetze (gap=%d)", len(hosts), len(nets),
              args.subnet_gap)
     if args.subnet_quota > 0:
-        log.info("--subnet-quota %d: pro Richtung werden nach %d erfolgreichen "
-                 "Quell-Hosts die restlichen Paare als 'skipped' uebersprungen",
-                 args.subnet_quota, args.subnet_quota)
+        log.info("--subnet-quota %d (Modus %s): pro Richtung werden nach %d "
+                 "Quell-Hosts (%s) die restlichen Paare als 'skipped' "
+                 "uebersprungen",
+                 args.subnet_quota, args.quota_mode, args.subnet_quota,
+                 "/".join(sorted(QUOTA_MODES[args.quota_mode])))
 
     pairs = [
         (a, b) for a in hosts for b in hosts
@@ -937,11 +954,12 @@ def main():
         writer.flush()
     lock = threading.Lock()
     progress = Progress(total=total, initial=initial)
-    direction_working = defaultdict(set)  # (src_net, tgt_net) -> set von Quell-IPs mit auth_ok
+    quota_statuses = QUOTA_MODES[args.quota_mode]
+    direction_working = defaultdict(set)  # (src_net, tgt_net) -> set von Quell-IPs mit Erfolg
     if args.subnet_quota > 0 and os.path.exists(detail_path):
         with open(detail_path, newline="", encoding="utf-8") as fh:
             for r in csv.DictReader(fh):
-                if r["status"] == "auth_ok":
+                if r["status"] in quota_statuses:
                     s_net = r.get("src_net") or r.get("src_24", "")
                     t_net = r.get("tgt_net") or r.get("tgt_24", "")
                     if s_net and t_net:
@@ -957,7 +975,8 @@ def main():
     try:
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
             futures = {ex.submit(worker, s, t, args, password, writer, lock,
-                                 progress, direction_working, log): s for s, t in tasks}
+                                 progress, direction_working, quota_statuses,
+                                 log): s for s, t in tasks}
             for fut in as_completed(futures):
                 try:
                     fut.result()

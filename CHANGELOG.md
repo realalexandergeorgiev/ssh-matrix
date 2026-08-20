@@ -5,6 +5,21 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v1.1.0] (2026-08-20) — Quota-Modus wählbar
+
+### Hinzugefügt
+- Neues Flag `--quota-mode {auth_ok,reachable}` (Default `auth_ok`):
+  bestimmt, welche Testergebnisse für `--subnet-quota` als
+  „funktionierender Quell-Host" zählen
+  - `auth_ok`: nur voller SSH-Login
+  - `reachable`: netzwerkseitig erreichbar (`auth_ok`, `auth_fail` oder
+    `port_open`)
+- Log-Meldung bei Start zeigt Modus + zählende Status
+
+### Geändert
+- Quota-Zähler (`direction_working`) lädt aus `detail.csv` jetzt nur noch
+  Status, die im gewählten Modus zählen
+
 ## [v1.0.0] (2026-08-20) — GitHub-Release
 
 ### Hinzugefügt
@@ -123,6 +138,7 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   `StrictHostKeyChecking=no`, keine known_hosts-Verschmutzung,
   Temp-Dateien auf Zielen sofort gelöscht
 
+[v1.1.0]: ./README.md
 [v1.0.0]: ./README.md
 [v0.5.0]: ./README.md
 [v0.4.0]: ./README.md

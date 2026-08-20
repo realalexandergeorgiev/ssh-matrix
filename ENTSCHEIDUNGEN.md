@@ -127,11 +127,13 @@ Netzstruktur.
 ## 9. Paar-basierte Subnetz-Quota pro Richtung
 
 **Entscheidung:** `--subnet-quota N` zählt pro Richtung (`src_net →
-tgt_net`), wie viele distinct Quell-Hosts mind. 1 `auth_ok` zu irgendeinem
-Host im Ziel-Netz hatten. Sobald N erreicht ist, werden die restlichen Paare
-dieser Richtung als `skipped` übersprungen. Die Zähler werden aus
-`detail.csv` geladen (Resume-kompatibel) und gelten auch für unerreichbare
-Quellen.
+tgt_net`), wie viele distinct Quell-Hosts mind. 1 zählendes Ergebnis zu
+irgendeinem Host im Ziel-Netz hatten. Was zählt, bestimmt `--quota-mode`:
+`auth_ok` (nur voller SSH-Login, Default) oder `reachable`
+(netzwerkseitig erreichbar: `auth_ok`, `auth_fail` oder `port_open`).
+Sobald N erreicht ist, werden die restlichen Paare dieser Richtung als
+`skipped` übersprungen. Die Zähler werden aus `detail.csv` geladen
+(Resume-kompatibel) und gelten auch für unerreichbare Quellen.
 
 **Begründung:**
 - „Eine bestimmte Anzahl Hosts eines Netzes kann ein anderes Netz
@@ -141,10 +143,14 @@ Quellen.
   Zeitgewinn, ohne dass jedes Host-Paar einzeln getestet wird.
 - `skipped` ist ein eigener Status (kein Fehler), gezielt retrybar über
   `--retry-status skipped`.
+- Der wählbare Modus trägt zwei Anwendungsfällen Rechnung: Strikte
+  Prüfung (nur Login zählt) vs. reine Netzwerk-Aussage (Port
+  erreichbar reicht). `auth_fail` zählt im `reachable`-Modus, weil es
+  beweist, dass der TCP/SSH-Weg funktioniert — nur die Anmeldung
+  scheitert.
 
 **Verworfen:** Quota nur für Intra-Subnetz-Paare — die gleiche Logik ist
-für Inter-Subnetz genauso nützlich. Quota aus `auth_ok` **oder**
-`port_open` — `port_open` ist nur Netzwerkerreichbarkeit, kein Login.
+für Inter-Subnetz genauso nützlich.
 
 ---
 

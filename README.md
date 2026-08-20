@@ -186,6 +186,7 @@ A auf A's Port; von A aus wird B auf B's Port getestet (`ssh -p <B_port>`).
 | `--retry-status S1,S2,…` | – | Status, die neu getestet werden (impliziert `--resume`). Z. B. `source_unreachable,skipped`. Gültig: `auth_ok auth_fail port_open port_closed net_unreachable source_unreachable no_tool tool_error unclear skipped` |
 | `--retry-all-failed` | aus | Shortcut: alle Paare außer `auth_ok`/`skipped` neu testen (impliziert `--resume`) |
 | `--subnet-quota N` | 0 (aus) | Mindestanzahl erfolgreicher Quell-Hosts pro Richtung (`src_net → tgt_net`); danach Rest als `skipped` überspringen |
+| `--quota-mode MODE` | `auth_ok` | Was zählt als „funktionierender Quell-Host" für `--subnet-quota`: `auth_ok` (nur voller Login) oder `reachable` (netzwerkseitig erreichbar: `auth_ok`, `auth_fail` oder `port_open`) |
 | `--subnet-gap N` | 16 | Lücken-Schwellwert für Subnetz-Clustering (0 = feste /24) |
 | `--limit-pairs N` | 0 (alle) | Nur die ersten N Paare testen (Trockenlauf) |
 
@@ -241,12 +242,20 @@ Hin und Zurück sind zwei Zeilen mit vertauschten `source`/`target`.
 ### Subnetz-Quota (schneller testen)
 
 Mit `--subnet-quota N` wird pro Richtung (`src_net → tgt_net`) nach N
-erfolgreichen Quell-Hosts (`auth_ok`) der Rest als `skipped` übersprungen.
-Das beschleunigt den Test massiv, da intra-Subnetz-Verbindungen fast immer
-funktionieren und nicht für jedes Host-Paar einzeln getestet werden müssen.
+Quell-Hosts der Rest als `skipped` übersprungen. Welche Ergebnisse als
+„funktionierender Quell-Host" zählen, bestimmt `--quota-mode`:
+
+- `auth_ok` (Default): nur voller SSH-Login zählt.
+- `reachable`: auch netzwerkseitig erreichbare Hosts zählen
+  (`auth_ok`, `auth_fail` oder `port_open`) — beweist, dass der Weg zum
+  Ziel-Netz funktioniert, auch wenn die Anmeldung fehlschlägt.
 
 ```bash
+# Nur voller Login zählt:
 python3 ssh_matrix.py --ips ips.txt --user USER --pass-env SSHPASS --subnet-quota 3
+
+# Netzwerk-Erreichbarkeit reicht:
+python3 ssh_matrix.py --ips ips.txt --user USER --pass-env SSHPASS --subnet-quota 3 --quota-mode reachable
 ```
 
 Die Netze werden nicht starr als /24 angenommen, sondern anhand der

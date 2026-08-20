@@ -35,7 +35,7 @@ CSV und Excel-Report aufbereitet.
 | FR-11 | M | `report.xlsx` enthält Sheets: **Suche** (Dropdowns VON/NACH mit Vorschlägen, Ergebnis per `INDEX`/`MATCH`), **Matrix**, **Netz-Matrix**, **Detail**, **Subnetze**, **Quelle**, **Liste**. |
 | FR-12 | M | Status-Klassifikation: `auth_ok`, `auth_fail`, `port_open`, `port_closed`, `net_unreachable`, `source_unreachable`, `no_tool`, `tool_error`, `unclear`, `skipped`. |
 | FR-13 | S | `--retry-status S1,S2,…` testet gezielt Paare mit bestimmten Status neu; `--retry-all-failed` als Shortcut (alles außer `auth_ok`/`skipped`). |
-| FR-14 | S | `--subnet-quota N`: pro Richtung (`src_net → tgt_net`) werden nach N erfolgreichen Quell-Hosts die restlichen Paare als `skipped` übersprungen. |
+| FR-14 | S | `--subnet-quota N`: pro Richtung (`src_net → tgt_net`) werden nach N funktionierenden Quell-Hosts die restlichen Paare als `skipped` übersprungen. `--quota-mode` wählt, was zählt: `auth_ok` (nur voller Login) oder `reachable` (netzwerkseitig erreichbar: `auth_ok`, `auth_fail`, `port_open`). |
 | FR-15 | S | Intelligentes Subnetz-Grouping per **Gap-Clustering** (`--subnet-gap`, Default 16): Netze werden aus der IP-Verteilung geschätzt, nicht starr als /24 angenommen. `--subnet-gap 0` = feste /24. |
 | FR-16 | S | **Netz-Matrix**: Subnetz-Pivot (Zeilen = Quell-Netze, Spalten = Ziel-Netze) als Sheet + `netz_matrix.csv`, Zellen `ok/tested` mit Farbcodierung. |
 | FR-17 | K | Farbcodierte Terminal-Ausgabe (Log-Zeilen + Live-Status-Zähler im Fortschrittsbalken), nur bei TTY, `NO_COLOR=1` deaktiviert. |
