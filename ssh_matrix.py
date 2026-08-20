@@ -62,7 +62,7 @@ KNOWN_STATUSES = {
 RETRY_ALL_EXCLUDE = {"auth_ok", "skipped"}
 SUCCESS_STATUSES = {"auth_ok"}
 
-VERSION = "v1.2.5"
+VERSION = "v1.2.6"
 AUTHOR = "Alex & DeepSeek"
 
 # RAM-Warnschwelle in MB (per env ueberschreibbar, z.B. fuer Tests).
@@ -758,16 +758,20 @@ def build_in_scope(n: int, limit: int):
 
 def stream_detail(detail_path: str, id_of: dict, n: int, in_scope, done_bits,
                   retry_statuses, retry_bits, quota: int, quota_statuses: set,
-                  direction_working, log) -> int:
+                  direction_working, detail_counts, log) -> int:
     """Ein Streaming-Pass ueber detail.csv (keine Zeilenliste im RAM):
     - done_bits        : getestete Paare markieren (dedupliziert)
     - initial (Return) : Anzahl in-scope bereits getesteter Paare (dedupliziert)
     - retry_bits       : Paare mit Status in retry_statuses (falls gesetzt)
     - direction_working: Quell-IPs je Richtung (auf quota gekappt)
+    - detail_counts    : Status-Verteilung ueber die ganze detail.csv
+                         (fuer den Zwischenbericht: Vorlauf-Daten)
     """
     initial = 0
     if not os.path.exists(detail_path):
         return 0
+    started = time.monotonic()
+    log.info("detail.csv laden (%s)...", detail_path)
     with open(detail_path, newline="", encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
             try:
@@ -778,6 +782,7 @@ def stream_detail(detail_path: str, id_of: dict, n: int, in_scope, done_bits,
             if s is None or t is None or s == t:
                 continue
             st = row["status"]
+            detail_counts[st] += 1
             if not done_bits.get(s, t):
                 done_bits.set(s, t)
                 if in_scope is None or in_scope.get(s, t):
@@ -791,6 +796,8 @@ def stream_detail(detail_path: str, id_of: dict, n: int, in_scope, done_bits,
                     dw = direction_working[(s_net, t_net)]
                     if len(dw) < quota:  # nur die Laenge zaehlt -> kappen
                         dw.add(row["source_ip"])
+    log.info("detail.csv geladen in %ds (%d getestete Paare gefunden)",
+             int(time.monotonic() - started), initial)
     return initial
 
 
@@ -861,7 +868,7 @@ class Progress:
     - counts  = Live-Zaehler je Status (farbig im Postfix)
     """
 
-    BAR_FMT = "{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}, {postfix}]"
+    BAR_FMT = "{desc}: {percentage:6.2f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}, {postfix}]"
 
     def __init__(self, total: int, initial: int = 0):
         self.total = total
@@ -916,6 +923,28 @@ class Progress:
     def close(self) -> None:
         if self.tq:
             self.tq.close()
+
+    def hide(self) -> None:
+        """Bar vor dem Pause-Menue ausblenden (sonst wird sie von Menue-
+        Ausgabe ueberschrieben und erscheint danach an falscher Position)."""
+        self.paused = True
+        if self.tq:
+            try:
+                self.tq.clear()
+                self.tq.close()
+            except Exception:
+                pass
+            self.tq = None
+
+    def show(self) -> None:
+        """Bar nach dem Pause-Menue neu aufbauen (Zaehlerstand bleibt)."""
+        self.paused = False
+        if tqdm:
+            self.tq = tqdm(total=self.total,
+                           initial=self.initial + self.real + self.instant,
+                           desc="SSH-Tests", unit="test",
+                           file=sys.stderr, leave=True, mininterval=1.0,
+                           bar_format=self.BAR_FMT)
 
 
 def chunk_list(lst: list, n: int) -> list:
@@ -1114,9 +1143,17 @@ def set_workers(config, n, work_queue, stop_event, user, password, writer,
 
 # ---------------------------------------------------------------- Zwischenbericht
 
+def fmt_num(n: int) -> str:
+    """Zahl mit Punkt-Tausendertrennung (z.B. 12648692 -> 12.648.692)."""
+    return f"{n:,}".replace(",", ".")
+
+
 def print_interim_report(progress, direction_working, config) -> None:
-    """Sprechender, farbiger Zwischenbericht fuer das Pause-Menue."""
+    """Sprechender, farbiger Zwischenbericht fuer das Pause-Menue.
+    Kumulativ: Vorlauf-Daten aus detail.csv (progress.detail_counts)
+    plus Zaehler des aktuellen Laufs."""
     counts = progress.counts
+    detail_counts = getattr(progress, "detail_counts", None) or Counter()
     done = progress.initial + progress.real + progress.instant
     pct = 100.0 * done / progress.total if progress.total else 0.0
     elapsed = time.monotonic() - progress.start
@@ -1126,20 +1163,31 @@ def print_interim_report(progress, direction_working, config) -> None:
 
     out = [""]
     out.append(paint(C_CYAN, "=========== ZWISCHENBERICHT ===========", bold=True))
-    out.append(f"Fortschritt: {paint(C_BOLD, str(done))} von {progress.total} Paaren "
-               f"({pct:.0f}%)")
-    out.append(f"  {progress.real} echte SSH-Tests, {progress.instant} sofort markiert · "
+    out.append(f"Fortschritt: {paint(C_BOLD, fmt_num(done))} von "
+               f"{fmt_num(progress.total)} Paaren ({pct:.2f}%)")
+    if progress.initial:
+        out.append(f"  davon {fmt_num(progress.initial)} bereits getestet (Vorlauf), "
+                   f"{fmt_num(progress.real + progress.instant)} in diesem Lauf")
+    out.append(f"  {fmt_num(progress.real)} echte SSH-Tests, "
+               f"{fmt_num(progress.instant)} sofort markiert · "
                f"{rate:.1f} Tests/Sek · Restdauer ca. {eta}")
     out.append("")
-    out.append(paint(C_CYAN, "Status im Detail:"))
+
+    merged = Counter(detail_counts)
+    merged.update(counts)
+    out.append(paint(C_CYAN, "Status gesamt (Vorlauf + Lauf):"))
     any_count = False
     for st in STATUS_ORDER:
-        n = counts.get(st, 0)
+        n = merged.get(st, 0)
         if n:
             any_count = True
-            out.append(f"  {colored(st, f'{n:>8}')}  {STATUS_DESCRIPTIONS[st]}")
+            out.append(f"  {colored(st, f'{fmt_num(n):>12}')}  {STATUS_DESCRIPTIONS[st]}")
     if not any_count:
-        out.append("  (noch keine Testergebnisse in diesem Lauf)")
+        out.append("  (noch keine Testergebnisse vorhanden)")
+    this_run = {st: n for st, n in counts.items() if n}
+    if this_run:
+        kurz = ", ".join(f"{STATUS_SHORT[st]}:{fmt_num(n)}" for st, n in this_run.items())
+        out.append(f"  {paint(C_GRAY, f'(davon in diesem Lauf: {kurz})')}")
     out.append("")
 
     if config.subnet_quota > 0:
@@ -1172,7 +1220,7 @@ def print_interim_report(progress, direction_working, config) -> None:
 def show_menu(config, progress, direction_working, work_queue, stop_event,
               user, password, writer, lock, log, ctx) -> bool:
     """Pause-Menue. Return True = weiterlaufen, False = Stop."""
-    progress.paused = True
+    progress.hide()  # Bar ausblenden, damit Menue-Output sie nicht zerstoert
     with config.lock:
         active_workers = config.active_workers
     try:
@@ -1256,7 +1304,7 @@ def show_menu(config, progress, direction_working, work_queue, stop_event,
                 return True
             print(f"Unbekannter Befehl: {cmd}", file=sys.stderr)
     finally:
-        progress.paused = False
+        progress.show()  # Bar nach dem Menue wieder aufbauen
 
 
 # ---------------------------------------------------------------- Main
@@ -1424,10 +1472,11 @@ def main():
                  pruned, ",".join(sorted(retry_statuses)))
 
     done_bits = PairBits(n)
+    detail_counts = Counter()
     initial = stream_detail(detail_path, id_of, n, scope_bits, done_bits,
                             retry_statuses, None,
                             args.subnet_quota, QUOTA_MODES[args.quota_mode],
-                            direction_working, log)
+                            direction_working, detail_counts, log)
     remaining = total - initial
     if retry_statuses:
         log.info("--retry-status: %d Paare verbleiben insgesamt (davon %d Re-Test)",
@@ -1458,6 +1507,7 @@ def main():
         writer.flush()
     lock = threading.Lock()
     progress = Progress(total=total, initial=initial)
+    progress.detail_counts = detail_counts  # fuer den Zwischenbericht (Vorlauf)
     ctx = RunContext(hosts, scope_bits, done_bits)
 
     log.info("Start: %d Aufgaben, %d Worker, timeout=%ds, per-source=%d",

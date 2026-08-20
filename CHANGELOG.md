@@ -5,6 +5,29 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v1.2.6] (2026-08-20) — Statuszeile stabil & Zwischenbericht kumulativ
+
+### Behoben
+- **Statuszeile (Fortschrittsbalken) verschwand nach dem Pause-Menü**:
+  Das Menü druckte auf stderr, während die tqdm-Bar dort lebte → nach
+  `c` zeichnete tqdm an der falschen Position neu. Jetzt blenden
+  `Progress.hide()`/`show()` die Bar vor dem Menü aus und bauen sie
+  danach mit erhaltenem Zählerstand neu auf.
+- **Zwischenbericht zeigte „viel 0"**: Er zeigte nur die Zähler des
+  aktuellen Laufs und rundete Prozent auf 0 Nachkommastellen (bei großen
+  Listen 0%). Jetzt kumulativ:
+  - Status-Verteilung **gesamt (Vorlauf aus detail.csv + Lauf)**
+  - Zeile „davon X bereits getestet (Vorlauf), Y in diesem Lauf"
+  - Prozent mit **2 Nachkommastellen** (0,15 % statt 0 %)
+  - Zahlen mit Punkt-Tausendertrennung (12.648.692)
+- **Lade-Phase sichtbar**: Beim Laden großer detail.csv wird „detail.csv
+  laden …" und „… geladen in Xs (N getestete Paare)" geloggt — die Bar
+  erscheint erst danach, das ist jetzt nachvollziehbar.
+
+### Hinzugefügt
+- `detail_counts`-Counter in `stream_detail` (Status-Verteilung der
+  Vorlauf-Daten, ein Durchlauf), im Zwischenbericht genutzt.
+
 ## [v1.2.5] (2026-08-20) — Ctrl+C im Pause-Menü korrigiert
 
 ### Behoben
@@ -269,6 +292,7 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   `StrictHostKeyChecking=no`, keine known_hosts-Verschmutzung,
   Temp-Dateien auf Zielen sofort gelöscht
 
+[v1.2.6]: ./README.md
 [v1.2.5]: ./README.md
 [v1.2.4]: ./README.md
 [v1.2.3]: ./README.md
