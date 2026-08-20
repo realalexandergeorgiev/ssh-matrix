@@ -5,6 +5,14 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v1.2.1] (2026-08-20) — Versions-Banner
+
+### Hinzugefügt
+- Start-Banner in `ssh_matrix.py` und `ssh_matrix_report.py` mit Version
+  (v1.2.1) und Autoren-Hinweis (Alex & DeepSeek), farbig bei TTY
+- `--version`-Flag in beiden Skripten
+- Version/Autoren-Hinweis in der README
+
 ## [v1.2.0] (2026-08-20) — Pause-Menü zur Laufzeit
 
 ### Hinzugefügt
@@ -202,6 +210,7 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   `StrictHostKeyChecking=no`, keine known_hosts-Verschmutzung,
   Temp-Dateien auf Zielen sofort gelöscht
 
+[v1.2.1]: ./README.md
 [v1.2.0]: ./README.md
 [v1.1.1]: ./README.md
 [v1.1.0]: ./README.md

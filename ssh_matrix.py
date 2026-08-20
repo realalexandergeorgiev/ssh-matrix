@@ -62,6 +62,24 @@ KNOWN_STATUSES = {
 RETRY_ALL_EXCLUDE = {"auth_ok", "skipped"}
 SUCCESS_STATUSES = {"auth_ok"}
 
+VERSION = "v1.2.1"
+AUTHOR = "Alex & DeepSeek"
+
+
+def print_banner(stream=sys.stderr) -> None:
+    """Start-Banner mit Version und Autoren-Hinweis (farbig bei TTY)."""
+    line = "=" * 44
+    if USE_COLOR:
+        print(paint(C_CYAN, line, bold=True), file=stream)
+        print(paint(C_CYAN, f"   SSH-Matrix-Tester {VERSION}", bold=True), file=stream)
+        print(paint(C_CYAN, f"   entwickelt von {AUTHOR}", bold=True), file=stream)
+        print(paint(C_CYAN, line, bold=True), file=stream)
+    else:
+        print(line, file=stream)
+        print(f"   SSH-Matrix-Tester {VERSION}", file=stream)
+        print(f"   entwickelt von {AUTHOR}", file=stream)
+        print(line, file=stream)
+
 # Quota-Modi: welche Testergebnisse zaehlen als "funktionierender Quell-Host"
 # fuer --subnet-quota.
 #   auth_ok   : nur voller SSH-Login
@@ -1110,6 +1128,8 @@ def parse_args():
     ap = argparse.ArgumentParser(
         description="SSH-Matrix-Tester: prueft fuer alle IP-Paare, ob Quelle A "
                     "per SSH-Login Ziel B erreichen kann (beide Richtungen).")
+    ap.add_argument("--version", action="version",
+                    version=f"%(prog)s {VERSION} (entwickelt von {AUTHOR})")
     ap.add_argument("--ips", required=True,
                     help="Pfad zur IP-Liste (Format siehe README / ips.txt.example)")
     ap.add_argument("--user", required=True, help="SSH-User (gilt fuer alle IPs)")
@@ -1186,6 +1206,9 @@ def main():
     sh.setFormatter(ColorFormatter("%(asctime)s %(levelname)s %(message)s"))
     log.addHandler(fh)
     log.addHandler(sh)
+
+    print_banner()
+    log.info("SSH-Matrix-Tester %s - entwickelt von %s", VERSION, AUTHOR)
 
     hosts = parse_ips_file(args.ips, args.port_default, log)
     if not hosts:

@@ -34,6 +34,19 @@ except ImportError:
 
 DEFAULT_PORT = 22
 
+VERSION = "v1.2.1"
+AUTHOR = "Alex & DeepSeek"
+
+
+def print_banner(stream=sys.stderr) -> None:
+    """Start-Banner mit Version und Autoren-Hinweis."""
+    line = "=" * 44
+    print(line, file=stream)
+    print(f"   SSH-Matrix-Tester {VERSION} - Report-Generator", file=stream)
+    print(f"   entwickelt von {AUTHOR}", file=stream)
+    print(line, file=stream)
+
+
 CODE = {
     "auth_ok": "OK",
     "auth_fail": "AUTH",
@@ -394,12 +407,16 @@ def build_xlsx(xlsx_path: str, detail_path: str, rows: list, eps: list,
 
 def main():
     ap = argparse.ArgumentParser(description="Erzeugt Matrix-CSV + report.xlsx aus detail.csv")
+    ap.add_argument("--version", action="version",
+                    version=f"%(prog)s {VERSION} (entwickelt von {AUTHOR})")
     ap.add_argument("--detail", required=True, help="Pfad zu detail.csv")
     ap.add_argument("--out", default="ssh_matrix_out",
                     help="Ausgabe-Verzeichnis (Default: ssh_matrix_out)")
     ap.add_argument("--matrix-name", default="matrix.csv")
     ap.add_argument("--xlsx-name", default="report.xlsx")
     args = ap.parse_args()
+
+    print_banner()
 
     if not os.path.exists(args.detail):
         print(f"FEHLER: {args.detail} existiert nicht", file=sys.stderr)

@@ -1,5 +1,7 @@
 # SSH-Matrix-Tester
 
+**Version v1.2.1** — entwickelt von **Alex & DeepSeek**.
+
 Testet für alle geordneten IP-Paare, ob **Quelle A einen vollen SSH-Login auf
 Ziel B aufbauen kann** – mit denselben Credentials (User/Passwort) auf allen
 Hosts. Es werden **beide Richtungen** getestet (A→B und B→A sind je ein
