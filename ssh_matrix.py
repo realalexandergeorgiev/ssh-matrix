@@ -26,6 +26,7 @@ import csv
 import ipaddress
 import logging
 import os
+import queue
 import re
 import secrets
 import shlex
@@ -34,7 +35,6 @@ import sys
 import threading
 import time
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 try:
@@ -71,6 +71,40 @@ QUOTA_MODES = {
     "auth_ok": {"auth_ok"},
     "reachable": {"auth_ok", "auth_fail", "port_open"},
 }
+
+# Klartext-Beschreibungen der Status (fuer den Zwischenbericht).
+STATUS_DESCRIPTIONS = {
+    "auth_ok": "Volle SSH-Logins erfolgreich - Quelle A konnte sich auf Ziel B anmelden",
+    "auth_fail": "Login abgelehnt - SSH-Port offen, aber Passwort/User falsch",
+    "port_open": "Nur Netzwerkport erreichbar - kein Login getestet, nur TCP offen",
+    "port_closed": "Port zu - Dienst laeuft nicht auf dem Ziel (Connection refused)",
+    "net_unreachable": "Netzwerk nicht erreichbar - Timeout, Firewall oder No Route",
+    "source_unreachable": "Quelle vom Kali nicht erreichbar - Kali->A fehlgeschlagen",
+    "no_tool": "Kein Testwerkzeug auf der Quelle - ssh/nc/bash fehlen",
+    "tool_error": "Unerwarteter Fehler beim Test - error-Spalte in detail.csv pruefen",
+    "unclear": "Nicht eindeutig - Port zu oder gefiltert",
+    "skipped": "Uebersprungen - Subnetz-Quota fuer diese Richtung erfuellt",
+}
+
+
+class RunConfig:
+    """Geteilte, zur Laufzeit veraenderbare Laufparameter.
+
+    Worker lesen timeout/subnet_quota/quota_mode pro Test neu - Aenderungen
+    aus dem Pause-Menue wirken sofort auf noch nicht getestete Paare.
+    """
+
+    def __init__(self, args):
+        self.lock = threading.Lock()
+        self.timeout = args.timeout
+        self.subnet_quota = args.subnet_quota
+        self.quota_mode = args.quota_mode
+        self.target_workers = args.workers
+        self.active_workers = 0
+
+    @property
+    def quota_statuses(self) -> set:
+        return QUOTA_MODES[self.quota_mode]
 
 # ------------------------------------------------------------ ANSI-Farben
 USE_COLOR = sys.stderr.isatty() and not os.environ.get("NO_COLOR")
@@ -114,6 +148,25 @@ def colored(status: str, text: str) -> str:
         return text
     col = STATUS_COLORS.get(status, "")
     return f"{col}{text}{C_RESET}" if col else text
+
+
+def paint(color: str, text: str, bold: bool = False) -> str:
+    """Farbe explizit waehlen (nur bei TTY). Keine ANSI-Codes in Pipes."""
+    if not USE_COLOR:
+        return text
+    start = f"{C_BOLD}{color}" if bold else color
+    return f"{start}{text}{C_RESET}"
+
+
+def fmt_duration(seconds: float) -> str:
+    s = int(seconds)
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return f"{h}h {m:02d}min"
+    if m:
+        return f"{m}min {sec:02d}s"
+    return f"{sec}s"
 
 
 class ColorFormatter(logging.Formatter):
@@ -292,15 +345,21 @@ def ep_label(host: dict) -> str:
 class SourceTester:
     """Persistente SSH-Verbindung Kali -> Quelle A + A->B-Testlogik."""
 
-    def __init__(self, src: dict, user: str, password: str, timeout: int):
+    def __init__(self, src: dict, user: str, password: str, config: RunConfig):
         self.src = src
         self.user = user
         self.password = password
-        self.timeout = timeout
+        self.config = config
         self.client = None
         self.tools = None
         self.ssh_askpass_force = False
         self.askpass_path = None
+
+    @property
+    def timeout(self) -> int:
+        """Timeout dynamisch aus config lesen - Aenderungen im Pause-Menue
+        wirken sofort auf neue Tests/Connects."""
+        return self.config.timeout
 
     # -- Verbindung ----------------------------------------------------
 
@@ -723,6 +782,7 @@ class Progress:
         self.counts = Counter()
         self.lock = threading.Lock()
         self.start = time.monotonic()
+        self.paused = False  # True waehrend Pause-Menue (kein tqdm-Redraw)
         self.tq = (
             tqdm(total=total, initial=initial, desc="SSH-Tests", unit="test",
                  file=sys.stderr, leave=True, mininterval=1.0, bar_format=self.BAR_FMT)
@@ -757,7 +817,8 @@ class Progress:
                 self.counts[status] += n
             if self.tq:
                 self.tq.update(n)
-                self.tq.set_postfix_str(self._postfix())
+                if not self.paused:
+                    self.tq.set_postfix_str(self._postfix())
             elif (self.real + self.instant) % 500 == 0:
                 print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] "
                       f"{self.initial + self.real + self.instant}/{self.total} "
@@ -775,18 +836,18 @@ def chunk_list(lst: list, n: int) -> list:
     return [lst[i:i + k] for i in range(0, len(lst), k)]
 
 
-def worker(src, targets, args, password, writer, lock, progress,
-           direction_working, quota_statuses, log) -> tuple:
-    tester = SourceTester(src, args.user, password, args.timeout)
+def worker(src, targets, config, user, password, writer, lock, progress,
+           direction_working, stop_event, log) -> tuple:
+    tester = SourceTester(src, user, password, config)
     ok, err = tester.connect()
     if not ok:
         with lock:
             n_skipped = 0
             n_srcerr = 0
             for tgt in targets:
-                if args.subnet_quota > 0:
+                if config.subnet_quota > 0:
                     direction = (src["net"], tgt["net"])
-                    if len(direction_working[direction]) >= args.subnet_quota:
+                    if len(direction_working[direction]) >= config.subnet_quota:
                         writer.writerow(make_row(src, tgt, "quota_skip", "skipped", 0, ""))
                         n_skipped += 1
                         continue
@@ -808,13 +869,16 @@ def worker(src, targets, args, password, writer, lock, progress,
     consec = 0
     done = 0
     while done < len(targets):
+        # Stop angefordert? Restliche Ziele ungeschrieben lassen -> Resume.
+        if stop_event.is_set():
+            break
         tgt = targets[done]
 
         # Subnetz-Quota: Richtung schon ausreichend getestet?
-        if args.subnet_quota > 0:
+        if config.subnet_quota > 0:
             direction = (src["net"], tgt["net"])
             with lock:
-                if len(direction_working[direction]) >= args.subnet_quota:
+                if len(direction_working[direction]) >= config.subnet_quota:
                     writer.writerow(make_row(src, tgt, "quota_skip", "skipped", 0, ""))
                     writer.flush()
                     progress.update(1, instant=True, status="skipped")
@@ -827,7 +891,7 @@ def worker(src, targets, args, password, writer, lock, progress,
                                      res["latency_ms"], res["error"]))
             writer.flush()
             progress.update(1, status=res["status"])
-            if args.subnet_quota > 0 and res["status"] in quota_statuses:
+            if config.subnet_quota > 0 and res["status"] in config.quota_statuses:
                 direction_working[(src["net"], tgt["net"])].add(src["ip"])
         if res["status"] == "tool_error" and not res["error"]:
             consec += 1
@@ -853,6 +917,191 @@ def worker(src, targets, args, password, writer, lock, progress,
 
     tester.cleanup()
     return (src["ip"], src["port"]), done, 0
+
+
+# ---------------------------------------------------------------- Worker-Pool
+
+def consumer(work_queue, config, stop_event, user, password, writer, lock,
+             progress, direction_working, log):
+    """Ein Consumer-Thread: zieht Tasks aus der Queue und fuehrt sie aus.
+    Beendet sich bei Stop, bei leerer Queue oder wenn ueberzaehlig
+    (Worker-Anpassung im Pause-Menue)."""
+    while not stop_event.is_set():
+        # Shrink: ueberschuessige Consumer beenden sich nach aktuellem Task.
+        with config.lock:
+            if config.active_workers > config.target_workers:
+                config.active_workers -= 1
+                return
+        try:
+            src, targets = work_queue.get(timeout=0.5)
+        except queue.Empty:
+            with config.lock:
+                config.active_workers -= 1
+            return
+        try:
+            worker(src, targets, config, user, password, writer, lock,
+                   progress, direction_working, stop_event, log)
+        except Exception as exc:
+            log.exception("Worker-Fehler fuer Quelle %s", src["ip"])
+        finally:
+            work_queue.task_done()
+    with config.lock:
+        config.active_workers -= 1
+
+
+def spawn_consumers(n, work_queue, config, stop_event, user, password, writer,
+                    lock, progress, direction_working, log):
+    """n neue Consumer-Threads starten."""
+    for _ in range(n):
+        with config.lock:
+            config.active_workers += 1
+        threading.Thread(
+            target=consumer,
+            args=(work_queue, config, stop_event, user, password, writer,
+                  lock, progress, direction_working, log),
+            daemon=True,
+        ).start()
+
+
+def set_workers(config, n, work_queue, stop_event, user, password, writer,
+                lock, progress, direction_working, log) -> None:
+    """Worker-Anzahl zur Laufzeit aendern. Mehr -> spawnen, weniger ->
+    ueberschuessige Consumer beenden sich nach ihrem aktuellen Task."""
+    if n < 0:
+        n = 0
+    with config.lock:
+        config.target_workers = n
+        current = config.active_workers
+    if n > current:
+        spawn_consumers(n - current, work_queue, config, stop_event, user,
+                        password, writer, lock, progress, direction_working, log)
+
+
+# ---------------------------------------------------------------- Zwischenbericht
+
+def print_interim_report(progress, direction_working, config) -> None:
+    """Sprechender, farbiger Zwischenbericht fuer das Pause-Menue."""
+    counts = progress.counts
+    done = progress.initial + progress.real + progress.instant
+    pct = 100.0 * done / progress.total if progress.total else 0.0
+    elapsed = time.monotonic() - progress.start
+    rate = progress.real / elapsed if elapsed > 0 and progress.real else 0.0
+    remaining = progress.total - done
+    eta = fmt_duration(remaining / rate) if rate > 0 and remaining > 0 else "unbekannt"
+
+    out = [""]
+    out.append(paint(C_CYAN, "=========== ZWISCHENBERICHT ===========", bold=True))
+    out.append(f"Fortschritt: {paint(C_BOLD, str(done))} von {progress.total} Paaren "
+               f"({pct:.0f}%)")
+    out.append(f"  {progress.real} echte SSH-Tests, {progress.instant} sofort markiert · "
+               f"{rate:.1f} Tests/Sek · Restdauer ca. {eta}")
+    out.append("")
+    out.append(paint(C_CYAN, "Status im Detail:"))
+    any_count = False
+    for st in STATUS_ORDER:
+        n = counts.get(st, 0)
+        if n:
+            any_count = True
+            out.append(f"  {colored(st, f'{n:>8}')}  {STATUS_DESCRIPTIONS[st]}")
+    if not any_count:
+        out.append("  (noch keine Testergebnisse in diesem Lauf)")
+    out.append("")
+
+    if config.subnet_quota > 0:
+        confirmed = sum(1 for v in direction_working.values()
+                        if len(v) >= config.subnet_quota)
+        out.append(f"{paint(C_CYAN, 'Subnetz-Erreichbarkeit:')} {confirmed} von "
+                   f"{len(direction_working)} Richtungen bestaetigt "
+                   f"(Quota {config.subnet_quota}, Modus {config.quota_mode})")
+        problems = sorted(
+            ((s_net, t_net, len(srcs)) for (s_net, t_net), srcs
+             in direction_working.items() if len(srcs) < config.subnet_quota),
+            key=lambda x: x[2], reverse=True)
+        if problems:
+            for s_net, t_net, n in problems[:10]:
+                out.append(f"  {paint(C_YELLOW, s_net + ' -> ' + t_net + ':')} "
+                           f"{n} Quell-Hosts bestaetigt (Quota {config.subnet_quota} "
+                           f"noch nicht erreicht)")
+            if len(problems) > 10:
+                out.append(f"  ... und {len(problems) - 10} weitere Richtungen "
+                           f"mit Luecken")
+    else:
+        out.append("(Keine Subnetz-Quota aktiv - alle Richtungen werden voll getestet)")
+    out.append(paint(C_CYAN, "=======================================", bold=True))
+    out.append("")
+    print("\n".join(out), file=sys.stderr)
+
+
+# ---------------------------------------------------------------- Pause-Menue
+
+def show_menu(config, progress, direction_working, work_queue, stop_event,
+              user, password, writer, lock, log) -> bool:
+    """Pause-Menue. Return True = weiterlaufen, False = Stop."""
+    progress.paused = True
+    with config.lock:
+        active_workers = config.active_workers
+    try:
+        print(file=sys.stderr)
+        print(paint(C_CYAN, "=== Pause-Menue ===", bold=True), file=sys.stderr)
+        print(f"  {paint(C_GREEN, 's')}     Stop (sauber herunterfahren, Resume-faehig)", file=sys.stderr)
+        print(f"  {paint(C_GREEN, 'r')}     Zwischenbericht", file=sys.stderr)
+        print(f"  {paint(C_GREEN, 'w N')}   Worker auf N setzen (aktuell {active_workers})", file=sys.stderr)
+        print(f"  {paint(C_GREEN, 't N')}   Timeout auf N Sekunden (aktuell {config.timeout})", file=sys.stderr)
+        print(f"  {paint(C_GREEN, 'q N')}   Subnetz-Quota auf N (aktuell {config.subnet_quota})", file=sys.stderr)
+        print(f"  {paint(C_GREEN, 'm M')}   Quota-Modus auth_ok|reachable (aktuell {config.quota_mode})", file=sys.stderr)
+        print(f"  {paint(C_GREEN, 'c')}     Weiter", file=sys.stderr)
+        print("  ctrl-c  Hart abbrechen (Exit 130)", file=sys.stderr)
+        while True:
+            try:
+                cmd = input("menu> ").strip()
+            except KeyboardInterrupt:
+                print("Hart abgebrochen.", file=sys.stderr)
+                os._exit(130)
+            if not cmd:
+                continue
+            parts = cmd.split()
+            c = parts[0].lower()
+            if c in ("s", "stop"):
+                return False
+            if c in ("r", "report"):
+                print_interim_report(progress, direction_working, config)
+                continue
+            if c == "w" and len(parts) > 1:
+                try:
+                    set_workers(config, int(parts[1]), work_queue, stop_event,
+                                user, password, writer, lock, progress,
+                                direction_working, log)
+                    print(f"Worker-Ziel auf {parts[1]} gesetzt.", file=sys.stderr)
+                except ValueError:
+                    print("Ungueltige Zahl.", file=sys.stderr)
+                continue
+            if c == "t" and len(parts) > 1:
+                try:
+                    config.timeout = max(1, int(parts[1]))
+                    print(f"Timeout auf {config.timeout}s gesetzt.", file=sys.stderr)
+                except ValueError:
+                    print("Ungueltige Zahl.", file=sys.stderr)
+                continue
+            if c == "q" and len(parts) > 1:
+                try:
+                    config.subnet_quota = max(0, int(parts[1]))
+                    print(f"Subnetz-Quota auf {config.subnet_quota} gesetzt.", file=sys.stderr)
+                except ValueError:
+                    print("Ungueltige Zahl.", file=sys.stderr)
+                continue
+            if c == "m" and len(parts) > 1:
+                mode = parts[1].lower()
+                if mode in QUOTA_MODES:
+                    config.quota_mode = mode
+                    print(f"Quota-Modus auf {mode} gesetzt.", file=sys.stderr)
+                else:
+                    print(f"Ungueltiger Modus. Gueltig: {', '.join(QUOTA_MODES)}", file=sys.stderr)
+                continue
+            if c in ("c", "continue", "weiter"):
+                return True
+            print(f"Unbekannter Befehl: {cmd}", file=sys.stderr)
+    finally:
+        progress.paused = False
 
 
 # ---------------------------------------------------------------- Main
@@ -1021,12 +1270,11 @@ def main():
         writer.flush()
     lock = threading.Lock()
     progress = Progress(total=total, initial=initial)
-    quota_statuses = QUOTA_MODES[args.quota_mode]
     direction_working = defaultdict(set)  # (src_net, tgt_net) -> set von Quell-IPs mit Erfolg
     if args.subnet_quota > 0 and os.path.exists(detail_path):
         with open(detail_path, newline="", encoding="utf-8") as fh:
             for r in csv.DictReader(fh):
-                if r["status"] in quota_statuses:
+                if r["status"] in QUOTA_MODES[args.quota_mode]:
                     s_net = r.get("src_net") or r.get("src_24", "")
                     t_net = r.get("tgt_net") or r.get("tgt_24", "")
                     if s_net and t_net:
@@ -1038,31 +1286,47 @@ def main():
     log.info("Start: %d Aufgaben, %d Worker, timeout=%ds, per-source=%d",
              len(tasks), args.workers, args.timeout, args.per_source)
 
+    config = RunConfig(args)
+    work_queue = queue.Queue()
+    for task in tasks:
+        work_queue.put(task)
+    stop_event = threading.Event()
+
+    spawn_consumers(args.workers, work_queue, config, stop_event, args.user,
+                    password, writer, lock, progress, direction_working, log)
+
     started = time.monotonic()
-    ex = ThreadPoolExecutor(max_workers=args.workers)
     try:
-        futures = {ex.submit(worker, s, t, args, password, writer, lock,
-                             progress, direction_working, quota_statuses,
-                             log): s for s, t in tasks}
-        for fut in as_completed(futures):
+        while not stop_event.is_set():
+            with config.lock:
+                active = config.active_workers
+            if work_queue.empty() and active == 0:
+                break  # alles getestet, alle Consumer fertig
             try:
-                fut.result()
-            except Exception as exc:
-                log.exception("Worker-Fehler fuer Quelle %s", futures[fut])
+                time.sleep(0.5)
+            except KeyboardInterrupt:
+                # 1x Ctrl+C -> Pause-Menue (Worker laufen weiter);
+                # 'c' kehrt zurueck in die Schleife, 's' stoppt sauber.
+                if not show_menu(config, progress, direction_working, work_queue,
+                                 stop_event, args.user, password, writer, lock, log):
+                    log.warning("Stop angefordert - Worker beenden aktuellen Test, "
+                                "Rest bleibt fuer --resume erhalten")
+                    break
     except KeyboardInterrupt:
-        # Sofort beenden OHNE auf haengende Worker zu warten
-        # (shutdown(wait=True) bzw. Interpreter-Exit wuerde blockieren).
-        log.warning("Abbruch durch Benutzer - bereits geschriebene Ergebnisse bleiben erhalten "
-                    "(Resume mit --resume moeglich)")
-        try:
-            csvf.flush()
-            csvf.close()
-            progress.close()
-        except Exception:
-            pass
+        # 2x Ctrl+C ausserhalb des Menues -> hart abbrechen.
+        log.warning("Abbruch durch Benutzer (2x Ctrl+C) - Ergebnisse bleiben erhalten")
         os._exit(130)
-    finally:
-        ex.shutdown(wait=True)
+
+    # Sauber herunterfahren: warten bis alle Consumer ihren aktuellen Task
+    # beendet haben (begrenzt, damit nichts haengt).
+    stop_event.set()
+    wait_deadline = time.monotonic() + 120
+    while time.monotonic() < wait_deadline:
+        with config.lock:
+            active = config.active_workers
+        if active == 0:
+            break
+        time.sleep(0.2)
 
     csvf.close()
     progress.close()

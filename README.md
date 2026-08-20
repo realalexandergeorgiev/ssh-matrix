@@ -109,6 +109,34 @@ deaktiviert Farben, `run.log` ist immer ungefärbt): `auth_ok` grün, `auth_fail
 gelb, Timeouts/Unreachable rot usw. – sowohl in den Log-Zeilen als auch als
 Live-Zähler im Fortschrittsbalken (z. B. `OK:123 AUTH:5 UNREACH:3`).
 
+### Pause-Menü zur Laufzeit (1× Ctrl+C)
+
+Während des Laufs öffnet **1× Ctrl+C** ein interaktives Menü (die Worker
+laufen weiter; 2× Ctrl+C bricht hart ab, Exit 130):
+
+```
+=== Pause-Menue ===
+  s     Stop (sauber herunterfahren, Resume-faehig)
+  r     Zwischenbericht
+  w N   Worker auf N setzen (aktuell 2)
+  t N   Timeout auf N Sekunden (aktuell 10)
+  q N   Subnetz-Quota auf N (aktuell 3)
+  m M   Quota-Modus auth_ok|reachable (aktuell auth_ok)
+  c     Weiter
+menu>
+```
+
+- **`s`** stoppt sauber: Worker beenden den aktuellen Test, die restlichen
+  Paare bleiben ungeschrieben → `--resume` testet sie beim nächsten Lauf.
+- **`r`** zeigt einen sprechenden, farbigen Zwischenbericht: Fortschritt +
+  ETA, Status-Verteilung mit Klartext-Erklärung (z. B. „Login abgelehnt –
+  SSH-Port offen, aber Passwort/User falsch") und Subnetz-Erreichbarkeit
+  (bestätigte Richtungen vs. Richtungen mit Lücken).
+- **`w N` / `t N` / `q N` / `m M`** ändern Parameter zur Laufzeit; die
+  Wirkung greift für noch nicht getestete Paare. `w 0` pausiert die Arbeit
+  komplett (alle Worker beenden sich nach dem aktuellen Test), `w N` mit
+  N>0 nimmt sie wieder auf.
+
 ### Neue IPs hinzufügen (inkrementell)
 
 Neue IPs einfach in `ips.txt` eintragen (alte bleiben drin) und mit `--resume`

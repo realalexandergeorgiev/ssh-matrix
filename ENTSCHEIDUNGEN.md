@@ -237,3 +237,29 @@ wäre eine Lizenz (z. B. MIT) nachzutragen.
 (hängende exec + wartender Executor-Shutdown); (2) häufiges `NOTOOL` trotz
 vorhandener Werkzeuge (transiente Erkennungsfehler wurden permanent gecacht
 bzw. `setsid`/`base64` wurden überzogen vorausgesetzt).
+
+---
+
+## 15. Pause-Menü zur Laufzeit (v1.2.0)
+
+**Entscheidung:** 1× Ctrl+C öffnet ein interaktives Menü (Worker laufen
+weiter), 2× Ctrl+C bricht hart ab (Exit 130). Menü-Befehle: `s` Stop,
+`r` Zwischenbericht, `w N` Worker, `t N` Timeout, `q N` Subnetz-Quota,
+`m M` Quota-Modus, `c` weiter. Der `ThreadPoolExecutor` wurde durch
+Queue + daemon-Client-Threads ersetzt; veränderbare Parameter liegen in
+`RunConfig`, `SourceTester.timeout` ist eine Property, die live aus der
+Config liest. Ein `stop_event` wird im Worker-Loop vor jedem Test geprüft.
+
+**Begründung:**
+- `ThreadPoolExecutor.max_workers` ist nach der Erstellung **nicht änderbar**.
+  Eine Worker-Anpassung zur Laufzeit (b) verlangt daher ein eigenes
+  Thread-Pool-Modell (Queue + Consumer). Das gleiche Modell ermöglicht
+  Stop (a), Parameter-Anpassung (c) und Zwischenbericht (d) sauber.
+- Stop statt hartem Exit: laufende Tests werden nicht mitten in einer
+  SSH-Verbindung abgebrochen; restliche Paare bleiben ungeschrieben und
+  werden von `--resume` nachgeholt.
+- Der Zwischenbericht ist bewusst **sprechend** (Klartext-Erklärung je
+  Status) statt Kürzel, weil der Nutzer den Lauf ohne Nachschlagen
+  bewerten können soll; Farben folgen den bestehenden Status-Farben.
+- Ctrl+C als Trigger statt Keypress-Listener: keine Extra-Abhängigkeit,
+  funktioniert über SSH, und „2× Ctrl+C = hart" ist ein vertrautes Muster.

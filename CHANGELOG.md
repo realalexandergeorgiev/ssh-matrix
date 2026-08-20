@@ -5,6 +5,29 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v1.2.0] (2026-08-20) — Pause-Menü zur Laufzeit
+
+### Hinzugefügt
+- **Pause-Menü** per 1× Ctrl+C während des Laufs (Worker laufen weiter).
+  2× Ctrl+C bricht hart ab (Exit 130).
+  - `s` — sauberer Stop: Worker beenden den aktuellen Test, restliche Paare
+    bleiben ungeschrieben → `--resume` testet sie später nach
+  - `r` — **sprechender, farbiger Zwischenbericht**: Fortschritt + ETA,
+    Status-Verteilung mit Klartext-Erklärung je Status (nicht nur Kürzel),
+    Subnetz-Erreichbarkeit (bestätigte Richtungen vs. Lücken)
+  - `w N` — Worker-Anzahl zur Laufzeit ändern (spawnen/abbauen)
+  - `t N` — Timeout zur Laufzeit ändern (wirkt auf neue Tests/Connects)
+  - `q N` — Subnetz-Quota zur Laufzeit ändern (wirkt auf ungetestete Paare)
+  - `m MODE` — Quota-Modus `auth_ok|reachable` zur Laufzeit ändern
+  - `c` — weiterlaufen
+- **Worker-Pool umgebaut**: `ThreadPoolExecutor` (fixe Thread-Zahl) durch
+  Queue + daemon-Client-Threads ersetzt — Grundlage für dynamische
+  Worker-Anzahl und sauberes Stoppen. `RunConfig` hält die veränderbaren
+  Parameter; `SourceTester.timeout` ist eine Property, die live aus der
+  Config liest.
+- `stop_event` im Worker-Loop: beim Stop wird nach dem aktuellen Test
+  abgebrochen, SSH-Verbindungen werden sauber geschlossen.
+
 ## [v1.1.1] (2026-08-20) — Hängende Worker & NOTOOL-Fehldiagnose behoben
 
 ### Behoben
@@ -179,6 +202,7 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   `StrictHostKeyChecking=no`, keine known_hosts-Verschmutzung,
   Temp-Dateien auf Zielen sofort gelöscht
 
+[v1.2.0]: ./README.md
 [v1.1.1]: ./README.md
 [v1.1.0]: ./README.md
 [v1.0.0]: ./README.md
