@@ -34,7 +34,7 @@ import socket
 import sys
 import threading
 import time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from datetime import datetime, timezone
 
 try:
@@ -43,11 +43,6 @@ except ImportError:
     print("FEHLER: paramiko fehlt. Auf dem Kali-Host installieren:", file=sys.stderr)
     print("  sudo apt install -y python3-paramiko", file=sys.stderr)
     sys.exit(2)
-
-try:
-    from tqdm import tqdm
-except ImportError:
-    tqdm = None
 
 DEFAULT_PORT = 22
 TOOL_PROBE = "sshpass ssh nc bash setsid timeout sh base64"
@@ -62,7 +57,7 @@ KNOWN_STATUSES = {
 RETRY_ALL_EXCLUDE = {"auth_ok", "skipped"}
 SUCCESS_STATUSES = {"auth_ok"}
 
-VERSION = "v1.2.6"
+VERSION = "v2.0.0"
 AUTHOR = "Alex & DeepSeek"
 
 # RAM-Warnschwelle in MB (per env ueberschreibbar, z.B. fuer Tests).
@@ -857,51 +852,34 @@ class CsvWriter:
         self._fh.flush()
 
 
-class Progress:
-    """Fortschrittsanzeige mit Resume-Offset und ehrlicher Rate.
+class RunStats:
+    """Thread-sichere Lauf-Statistik (ersetzt die tqdm-basierte Progress-Bar).
 
-    - total   = Umfang des aktuellen Laufs (inkl. bereits fertiger Paare)
-    - initial = bereits fertige Paare vor diesem Lauf (Resume-Offset)
-    - real    = echte SSH-Tests dieses Laufs (bestimmen die Rate)
-    - instant = sofort abgeschlossene Paare (z.B. source_unreachable),
-                zaehlen fuer die Bar-Position, aber nicht fuer die Rate.
-    - counts  = Live-Zaehler je Status (farbig im Postfix)
+    - total    = Umfang des aktuellen Laufs (inkl. bereits fertiger Paare)
+    - initial  = bereits fertige Paare vor diesem Lauf (Resume-Offset)
+    - real     = echte SSH-Tests dieses Laufs
+    - instant  = sofort abgeschlossene Paare (z.B. source_unreachable)
+    - counts   = Live-Zaehler je Status (dieser Lauf)
+    - detail_counts = Status-Verteilung aus detail.csv (Vorlauf)
+    - pps/real_s/threads_h = Historien fuer Graphen (TUI, btop-Look)
     """
 
-    BAR_FMT = "{desc}: {percentage:6.2f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}, {postfix}]"
-
-    def __init__(self, total: int, initial: int = 0):
+    def __init__(self, total: int, initial: int = 0, history_len: int = 120):
         self.total = total
         self.initial = initial
         self.real = 0
         self.instant = 0
         self.counts = Counter()
+        self.detail_counts = Counter()
         self.lock = threading.Lock()
         self.start = time.monotonic()
-        self.paused = False  # True waehrend Pause-Menue (kein tqdm-Redraw)
-        self.tq = (
-            tqdm(total=total, initial=initial, desc="SSH-Tests", unit="test",
-                 file=sys.stderr, leave=True, mininterval=1.0, bar_format=self.BAR_FMT)
-            if tqdm else None
-        )
-
-    def _postfix(self) -> str:
-        elapsed = time.monotonic() - self.start
-        rate = self.real / elapsed if elapsed > 0 and self.real else 0.0
-        remaining = self.total - self.initial - self.real - self.instant
-        eta = int(remaining / rate) if rate > 0 and remaining > 0 else 0
-        parts = []
-        if rate > 0:
-            parts.append(f"{rate:.1f} real/s")
-        if self.instant:
-            parts.append(f"{self.instant} instant")
-        if eta:
-            parts.append(f"ETA {eta}s")
-        for st in STATUS_ORDER:
-            n = self.counts.get(st, 0)
-            if n:
-                parts.append(colored(st, f"{STATUS_SHORT[st]}:{n}"))
-        return ", ".join(parts) if parts else "keine Tests bisher"
+        self._last_sample = self.start
+        self._last_done = self.initial
+        self._last_real = 0
+        self._last_status = 0.0
+        self.pps = deque(maxlen=history_len)
+        self.real_s = deque(maxlen=history_len)
+        self.threads_h = deque(maxlen=history_len)
 
     def update(self, n: int = 1, instant: bool = False, status: str = None) -> None:
         with self.lock:
@@ -911,40 +889,76 @@ class Progress:
                 self.real += n
             if status:
                 self.counts[status] += n
-            if self.tq:
-                self.tq.update(n)
-                if not self.paused:
-                    self.tq.set_postfix_str(self._postfix())
-            elif (self.real + self.instant) % 500 == 0:
-                print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] "
-                      f"{self.initial + self.real + self.instant}/{self.total} "
-                      f"({self._postfix()})", file=sys.stderr)
 
-    def close(self) -> None:
-        if self.tq:
-            self.tq.close()
+    def done(self) -> int:
+        with self.lock:
+            return self.initial + self.real + self.instant
 
-    def hide(self) -> None:
-        """Bar vor dem Pause-Menue ausblenden (sonst wird sie von Menue-
-        Ausgabe ueberschrieben und erscheint danach an falscher Position)."""
-        self.paused = True
-        if self.tq:
-            try:
-                self.tq.clear()
-                self.tq.close()
-            except Exception:
-                pass
-            self.tq = None
+    def sample(self, active_threads: int) -> None:
+        """Einen Messpunkt fuer die Graphen aufnehmen (TUI-Refresher und
+        CLI-Einzeiler rufen das periodisch auf)."""
+        with self.lock:
+            now = time.monotonic()
+            dt = now - self._last_sample
+            if dt <= 0:
+                return
+            done_now = self.initial + self.real + self.instant
+            self.pps.append((done_now - self._last_done) / dt)
+            self.real_s.append((self.real - self._last_real) / dt)
+            self.threads_h.append(active_threads)
+            self._last_sample, self._last_done, self._last_real = \
+                now, done_now, self.real
 
-    def show(self) -> None:
-        """Bar nach dem Pause-Menue neu aufbauen (Zaehlerstand bleibt)."""
-        self.paused = False
-        if tqdm:
-            self.tq = tqdm(total=self.total,
-                           initial=self.initial + self.real + self.instant,
-                           desc="SSH-Tests", unit="test",
-                           file=sys.stderr, leave=True, mininterval=1.0,
-                           bar_format=self.BAR_FMT)
+    def _status_line_locked(self) -> str:
+        """Status-Einzeiler bauen (Lock muss bereits gehalten sein)."""
+        elapsed = time.monotonic() - self.start
+        done = self.initial + self.real + self.instant
+        pct = 100.0 * done / self.total if self.total else 0.0
+        rate = self.real / elapsed if elapsed > 0 and self.real else 0.0
+        remaining = self.total - done
+        eta = fmt_duration(remaining / rate) if rate > 0 and remaining > 0 else "unbekannt"
+        parts = [f"{fmt_num(done)}/{fmt_num(self.total)} ({pct:.2f}%)",
+                 f"{rate:.1f}/s", f"ETA {eta}"]
+        for st in STATUS_ORDER:
+            n = self.counts.get(st, 0)
+            if n:
+                parts.append(f"{STATUS_SHORT[st]}:{fmt_num(n)}")
+        return " · ".join(parts)
+
+    def status_line(self) -> str:
+        """Kompakter Status-Einzeiler (CLI-Modus)."""
+        with self.lock:
+            return self._status_line_locked()
+
+    def maybe_print_status(self, interval: int) -> None:
+        """CLI: periodischer Status-Einzeiler (alle `interval` Sekunden)."""
+        if interval <= 0:
+            return
+        now = time.monotonic()
+        with self.lock:
+            if now - self._last_status < interval:
+                return
+            self._last_status = now
+            line = self._status_line_locked()
+        print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {line}",
+              file=sys.stderr)
+
+    def snapshot(self) -> dict:
+        """Atomarer Daten-Schnappschuss fuer die TUI."""
+        with self.lock:
+            return {
+                "total": self.total,
+                "initial": self.initial,
+                "real": self.real,
+                "instant": self.instant,
+                "counts": dict(self.counts),
+                "detail_counts": dict(self.detail_counts),
+                "pps": list(self.pps),
+                "real_s": list(self.real_s),
+                "threads_h": list(self.threads_h),
+                "start": self.start,
+                "done": self.initial + self.real + self.instant,
+            }
 
 
 def chunk_list(lst: list, n: int) -> list:
@@ -1148,8 +1162,8 @@ def fmt_num(n: int) -> str:
     return f"{n:,}".replace(",", ".")
 
 
-def print_interim_report(progress, direction_working, config) -> None:
-    """Sprechender, farbiger Zwischenbericht fuer das Pause-Menue.
+def interim_report_lines(progress: RunStats, direction_working, config) -> list:
+    """Sprechender, farbiger Zwischenbericht (Zeilenliste) fuer die TUI.
     Kumulativ: Vorlauf-Daten aus detail.csv (progress.detail_counts)
     plus Zaehler des aktuellen Laufs."""
     counts = progress.counts
@@ -1212,99 +1226,7 @@ def print_interim_report(progress, direction_working, config) -> None:
         out.append("(Keine Subnetz-Quota aktiv - alle Richtungen werden voll getestet)")
     out.append(paint(C_CYAN, "=======================================", bold=True))
     out.append("")
-    print("\n".join(out), file=sys.stderr)
-
-
-# ---------------------------------------------------------------- Pause-Menue
-
-def show_menu(config, progress, direction_working, work_queue, stop_event,
-              user, password, writer, lock, log, ctx) -> bool:
-    """Pause-Menue. Return True = weiterlaufen, False = Stop."""
-    progress.hide()  # Bar ausblenden, damit Menue-Output sie nicht zerstoert
-    with config.lock:
-        active_workers = config.active_workers
-    try:
-        print(file=sys.stderr)
-        print(paint(C_CYAN, "=== Pause-Menue ===", bold=True), file=sys.stderr)
-        print(f"  {paint(C_GREEN, 's')}     Stop (sauber herunterfahren, Resume-faehig)", file=sys.stderr)
-        print(f"  {paint(C_GREEN, 'r')}     Zwischenbericht", file=sys.stderr)
-        print(f"  {paint(C_GREEN, 'w N')}   Worker auf N setzen (aktuell {active_workers})", file=sys.stderr)
-        print(f"  {paint(C_GREEN, 't N')}   Timeout auf N Sekunden (aktuell {config.timeout})", file=sys.stderr)
-        print(f"  {paint(C_GREEN, 'q N')}   Subnetz-Quota auf N (aktuell {config.subnet_quota})", file=sys.stderr)
-        print(f"  {paint(C_GREEN, 'm M')}   Quota-Modus auth_ok|reachable (aktuell {config.quota_mode})", file=sys.stderr)
-        print(f"  {paint(C_GREEN, 'v L')}   Verbosity err|warn|info (aktuell {config.verbose_level})", file=sys.stderr)
-        print(f"  {paint(C_GREEN, 'c')}     Weiter", file=sys.stderr)
-        print("  ctrl-c  1x Hinweis / 2x hintereinander = hart abbrechen (Exit 130)", file=sys.stderr)
-        ci_count = 0
-        while True:
-            try:
-                cmd = input("menu> ").strip()
-            except KeyboardInterrupt:
-                # 1x Ctrl+C im Menue: nur Hinweis, Menue bleibt offen.
-                # 2x hintereinander: harter Abbruch (Exit 130).
-                ci_count += 1
-                if ci_count >= 2:
-                    print("Hart abgebrochen.", file=sys.stderr)
-                    os._exit(130)
-                print("Hinweis: 's' = Stop, 'c' = Weiter. "
-                      "Nochmal Ctrl+C bricht hart ab.", file=sys.stderr)
-                continue
-            ci_count = 0
-            if not cmd:
-                continue
-            parts = cmd.split()
-            c = parts[0].lower()
-            if c in ("s", "stop"):
-                return False
-            if c in ("r", "report"):
-                print_interim_report(progress, direction_working, config)
-                continue
-            if c == "w" and len(parts) > 1:
-                try:
-                    set_workers(config, int(parts[1]), work_queue, stop_event,
-                                user, password, writer, lock, progress,
-                                direction_working, log, ctx)
-                    print(f"Worker-Ziel auf {parts[1]} gesetzt.", file=sys.stderr)
-                except ValueError:
-                    print("Ungueltige Zahl.", file=sys.stderr)
-                continue
-            if c == "t" and len(parts) > 1:
-                try:
-                    config.timeout = max(1, int(parts[1]))
-                    print(f"Timeout auf {config.timeout}s gesetzt.", file=sys.stderr)
-                except ValueError:
-                    print("Ungueltige Zahl.", file=sys.stderr)
-                continue
-            if c == "q" and len(parts) > 1:
-                try:
-                    config.subnet_quota = max(0, int(parts[1]))
-                    print(f"Subnetz-Quota auf {config.subnet_quota} gesetzt.", file=sys.stderr)
-                except ValueError:
-                    print("Ungueltige Zahl.", file=sys.stderr)
-                continue
-            if c == "m" and len(parts) > 1:
-                mode = parts[1].lower()
-                if mode in QUOTA_MODES:
-                    config.quota_mode = mode
-                    print(f"Quota-Modus auf {mode} gesetzt.", file=sys.stderr)
-                else:
-                    print(f"Ungueltiger Modus. Gueltig: {', '.join(QUOTA_MODES)}", file=sys.stderr)
-                continue
-            if c == "v" and len(parts) > 1:
-                level = parts[1].lower()
-                if level in LOG_LEVELS:
-                    config.verbose_level = level
-                    if config.stream_handler is not None:
-                        config.stream_handler.setLevel(LOG_LEVELS[level])
-                    print(f"Verbosity auf {level} gesetzt (stderr).", file=sys.stderr)
-                else:
-                    print(f"Ungueltige Stufe. Gueltig: {', '.join(LOG_LEVELS)}", file=sys.stderr)
-                continue
-            if c in ("c", "continue", "weiter"):
-                return True
-            print(f"Unbekannter Befehl: {cmd}", file=sys.stderr)
-    finally:
-        progress.show()  # Bar nach dem Menue wieder aufbauen
+    return out
 
 
 # ---------------------------------------------------------------- Main
@@ -1364,6 +1286,14 @@ def parse_args():
                          "0 = feste /24 wie bisher")
     ap.add_argument("--limit-pairs", type=int, default=0,
                     help="Nur die ersten N Paare testen (Dry-Run/Trockentest)")
+    ap.add_argument("--tui", action="store_true",
+                    help="TUI erzwingen (Textual; braucht: pip install textual). "
+                         "Ohne Flag: Auto-Detect (TTY + textual -> TUI)")
+    ap.add_argument("--no-tui", action="store_true",
+                    help="TUI deaktivieren (CLI-Modus erzwingen)")
+    ap.add_argument("--status-interval", type=int, default=30,
+                    help="CLI: periodischer Status-Einzeiler alle N Sekunden "
+                         "(Default: 30, 0 = aus)")
     return ap.parse_args()
 
 
@@ -1402,9 +1332,32 @@ def main():
     log.addHandler(fh)
     log.addHandler(sh)
 
-    print_banner()
-    log.info("SSH-Matrix-Tester %s - entwickelt von %s (verbose=%s)",
-             VERSION, AUTHOR, args.verbose)
+    # TUI-Aktivierung: --tui erzwingt, --no-tui deaktiviert, sonst Auto-Detect
+    # (stderr+stdin TTY UND textual installiert).
+    use_tui = False
+    tui_log_handler = None
+    if args.tui or (not args.no_tui and sys.stderr.isatty() and sys.stdin.isatty()):
+        try:
+            from ssh_matrix_tui import TuiLogHandler, run_tui
+        except ImportError:
+            if args.tui:
+                print("FEHLER: textual ist nicht installiert. Installation: "
+                      "pip3 install --break-system-packages textual",
+                      file=sys.stderr)
+                sys.exit(2)
+            run_tui = None
+        else:
+            use_tui = True
+            log.removeHandler(sh)  # stderr gehoert jetzt der TUI
+            tui_log_handler = TuiLogHandler()
+            tui_log_handler.setFormatter(
+                logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+            log.addHandler(tui_log_handler)
+
+    if not use_tui:
+        print_banner()
+    log.info("SSH-Matrix-Tester %s - entwickelt von %s (verbose=%s, tui=%s)",
+             VERSION, AUTHOR, args.verbose, use_tui)
 
     hosts = parse_ips_file(args.ips, args.port_default, log)
     if not hosts:
@@ -1506,66 +1459,78 @@ def main():
         writer.writerow(CSV_HEADER)
         writer.flush()
     lock = threading.Lock()
-    progress = Progress(total=total, initial=initial)
-    progress.detail_counts = detail_counts  # fuer den Zwischenbericht (Vorlauf)
+    stats = RunStats(total=total, initial=initial)
+    stats.detail_counts = detail_counts  # fuer den Zwischenbericht (Vorlauf)
     ctx = RunContext(hosts, scope_bits, done_bits)
 
     log.info("Start: %d Aufgaben, %d Worker, timeout=%ds, per-source=%d",
              len(tasks), args.workers, args.timeout, args.per_source)
 
     config = RunConfig(args)
-    config.stream_handler = sh  # fuer 'v LEVEL' im Pause-Menue
+    config.stream_handler = sh if not use_tui else None
     work_queue = queue.Queue()
     for task in tasks:
         work_queue.put(task)
     stop_event = threading.Event()
 
     spawn_consumers(args.workers, work_queue, config, stop_event, args.user,
-                    password, writer, lock, progress, direction_working, log, ctx)
+                    password, writer, lock, stats, direction_working, log, ctx)
 
     started = time.monotonic()
-    try:
-        while not stop_event.is_set():
-            with config.lock:
-                active = config.active_workers
-            if work_queue.empty() and active == 0:
-                break  # alles getestet, alle Consumer fertig
-            try:
-                time.sleep(0.5)
-            except KeyboardInterrupt:
-                # 1x Ctrl+C -> Pause-Menue (Worker laufen weiter);
-                # 'c' kehrt zurueck in die Schleife, 's' stoppt sauber.
-                if not show_menu(config, progress, direction_working, work_queue,
-                                 stop_event, args.user, password, writer, lock,
-                                 log, ctx):
-                    log.warning("Stop angefordert - Worker beenden aktuellen Test, "
-                                "Rest bleibt fuer --resume erhalten")
+    if use_tui:
+        # TUI: blockiert bis Stop/Quit (bestätigt per Modal).
+        run_tui(config, stats, direction_working, work_queue, stop_event,
+                args.user, password, writer, lock, log, ctx, tui_log_handler)
+        log.warning("TUI beendet - sauberer Stop, Rest bleibt fuer --resume erhalten")
+    else:
+        try:
+            while not stop_event.is_set():
+                with config.lock:
+                    active = config.active_workers
+                if work_queue.empty() and active == 0:
+                    break  # alles getestet, alle Consumer fertig
+                stats.maybe_print_status(args.status_interval)
+                stats.sample(active)
+                try:
+                    time.sleep(0.5)
+                except KeyboardInterrupt:
+                    # 1x Ctrl+C = sauberer Stop (resume-faehig)
+                    log.warning("Stop angefordert (Ctrl+C) - Worker beenden "
+                                "aktuellen Test, Rest bleibt fuer --resume erhalten")
                     break
-    except KeyboardInterrupt:
-        # 2x Ctrl+C ausserhalb des Menues -> hart abbrechen.
-        log.warning("Abbruch durch Benutzer (2x Ctrl+C) - Ergebnisse bleiben erhalten")
-        os._exit(130)
+        except KeyboardInterrupt:
+            # 2x Ctrl+C ausserhalb -> hart abbrechen.
+            log.warning("Abbruch durch Benutzer (2x Ctrl+C) - Ergebnisse bleiben erhalten")
+            os._exit(130)
 
     # Sauber herunterfahren: warten bis alle Consumer ihren aktuellen Task
     # beendet haben (begrenzt, damit nichts haengt).
     stop_event.set()
     wait_deadline = time.monotonic() + 120
-    while time.monotonic() < wait_deadline:
-        with config.lock:
-            active = config.active_workers
-        if active == 0:
-            break
-        time.sleep(0.2)
+    try:
+        while time.monotonic() < wait_deadline:
+            with config.lock:
+                active = config.active_workers
+            if active == 0:
+                break
+            time.sleep(0.2)
+    except KeyboardInterrupt:
+        log.warning("Abbruch waehrend Shutdown - hart beendet")
+        try:
+            csvf.flush()
+        except Exception:
+            pass
+        os._exit(130)
 
+    stats.sample(0)
     csvf.close()
-    progress.close()
     elapsed = time.monotonic() - started
 
     log.info("Fertig in %ds. Auswertung: python3 ssh_matrix_report.py --detail %s --out %s",
              int(elapsed), detail_path, args.out)
-    ok_count = progress.counts.get("auth_ok", 0)
-    fail_count = progress.real + progress.instant - ok_count
-    if USE_COLOR:
+    ok_count = stats.counts.get("auth_ok", 0)
+    fail_count = stats.real + stats.instant - ok_count
+    if USE_COLOR and not use_tui:
         print(f"\n{C_GREEN}Fertig{C_RESET} in {int(elapsed)}s. "
               f"{colored('auth_ok', f'{ok_count} OK')}, "
               f"{colored('auth_fail', f'{fail_count} Fehler')}. "
@@ -1573,7 +1538,7 @@ def main():
         print(f"{C_CYAN}Report erzeugen:{C_RESET}", file=sys.stderr)
         print(f"  python3 ssh_matrix_report.py --detail {detail_path} --out {args.out}",
               file=sys.stderr)
-    else:
+    elif not use_tui:
         print(f"\nFertig in {int(elapsed)}s. {ok_count} OK, {fail_count} Fehler. "
               f"Ergebnisse: {detail_path}", file=sys.stderr)
         print("Report erzeugen:", file=sys.stderr)

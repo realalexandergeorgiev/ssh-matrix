@@ -5,6 +5,34 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v2.0.0] (2026-08-20) — TUI (Textual) & vereinfachter CLI
+
+### Hinzugefügt
+- **TUI (Textual, btop-artig)** — Auto-Detect (TTY + textual installiert),
+  erzwingbar mit `--tui`, deaktivierbar mit `--no-tui`:
+  - **Panes**: Status (Fortschritt, ETA, kumulative Status-Tabelle),
+    Settings (Worker/Timeout/Quota/Modus/Verbosity), Graphen
+    (pairs/s, real-tests/s, aktive Threads als Sparklines), Log
+    (farbige Zeilen via `TuiLogHandler`)
+  - **Tasten**: `s` Stop, `q` Quit, `r` Report-Overlay (kumulativer
+    Zwischenbericht), `p` Pause/Weiter, `w/t/q/m/v` Settings-Eingabe
+    (Modal), `ctrl+c`/`ctrl+q` Beenden
+  - **Abbrechen-Warnung**: Stop/Quit nur nach Bestätigungs-Modal
+    (`j`=Ja, `n`/`Esc`=Nein)
+- **CLI vereinfacht**: tqdm und das Pause-Menü sind entfernt. CLI zeigt
+  Log-Zeilen + **periodischen Status-Einzeiler** (`--status-interval`,
+  Default 30 s): `[14:02:30] 18.342/12.648.692 (0,15 %) · 2,3/s · ETA 2h 05m`.
+- **1× Ctrl+C im CLI = sauberer Stop** (Worker beenden aktuellen Test,
+  Resume-fähig, Exit 0); 2× Ctrl+C = hart (Exit 130).
+- Neues Modul `ssh_matrix_tui.py` (lazy import — CLI braucht kein textual).
+
+### Geändert
+- `Progress` (tqdm) → **`RunStats`**: thread-sichere Statistik mit
+  Historie-Deques (pps, real/s, Threads) für Graphen; `snapshot()`,
+  `sample()`, `status_line()`. tqdm ist **keine Abhängigkeit mehr**.
+- `print_interim_report` → `interim_report_lines()` (Zeilenliste, von der
+  TUI als Overlay gerendert).
+
 ## [v1.2.6] (2026-08-20) — Statuszeile stabil & Zwischenbericht kumulativ
 
 ### Behoben
@@ -292,6 +320,7 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   `StrictHostKeyChecking=no`, keine known_hosts-Verschmutzung,
   Temp-Dateien auf Zielen sofort gelöscht
 
+[v2.0.0]: ./README.md
 [v1.2.6]: ./README.md
 [v1.2.5]: ./README.md
 [v1.2.4]: ./README.md

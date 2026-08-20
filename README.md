@@ -1,6 +1,6 @@
 # SSH-Matrix-Tester
 
-**Version v1.2.1** — entwickelt von **Alex & DeepSeek**.
+**Version v2.0.0** — entwickelt von **Alex & DeepSeek**.
 
 Testet für alle geordneten IP-Paare, ob **Quelle A einen vollen SSH-Login auf
 Ziel B aufbauen kann** – mit denselben Credentials (User/Passwort) auf allen
@@ -50,21 +50,28 @@ Das Skript läuft auf deiner **Kali-Maschine**. Dort einmalig:
 
 ```bash
 sudo apt update
-sudo apt install -y python3-paramiko python3-openpyxl python3-tqdm
-python3 -c "import paramiko, openpyxl, tqdm; print('OK')"
+sudo apt install -y python3-paramiko python3-openpyxl
+python3 -c "import paramiko, openpyxl; print('OK')"
+```
+
+Für die **TUI** (empfohlen, automatisch aktiv bei Terminal) zusätzlich:
+
+```bash
+pip3 install --break-system-packages textual
 ```
 
 Alternative per pip (falls apt-Versionen zu alt sind):
 
 ```bash
 sudo apt install -y python3-pip
-pip3 install --break-system-packages paramiko openpyxl tqdm
+pip3 install --break-system-packages paramiko openpyxl textual
 ```
 
-**Nicht nötig:** `sshpass` und GNU `parallel` auf dem Kali (paramiko übernimmt
-Kali→A). Auf den **Zielhosts** werden `sshpass`, `ssh`, `nc`, `bash` zur
-Laufzeit automatisch erkannt und je nach Verfügbarkeit eine Fallback-Kette
-verwendet.
+**Nicht nötig:** `sshpass`, GNU `parallel` und `tqdm` auf dem Kali (paramiko
+übernimmt Kali→A; die Fortschrittsanzeige kommt seit v2.0 aus der TUI bzw.
+dem CLI-Status-Einzeiler). Auf den **Zielhosts** werden `sshpass`, `ssh`,
+`nc`, `bash` zur Laufzeit automatisch erkannt und je nach Verfügbarkeit eine
+Fallback-Kette verwendet.
 
 Kopieren aufs Kali, z. B.:
 
@@ -100,49 +107,55 @@ weiterlaufen lassen – bereits getestete Paare werden übersprungen:
 python3 ssh_matrix.py --ips ips.txt --user meinuser --pass-env SSHPASS --out ssh_matrix_out --resume
 ```
 
-Der Fortschrittsbalken zeigt bei `--resume` den **Gesamtfortschritt** über alle
+Der Fortschritt zeigt bei `--resume` den **Gesamtfortschritt** über alle
 Läufe hinweg (z. B. startet er bei `18000/48000`, wenn 18.000 Paare schon
-getestet sind). Die angezeigte Rate (`real/s`) zählt nur echte SSH-Tests –
+getestet sind). Die angezeigte Rate (`/s`) zählt nur echte SSH-Tests –
 sofort markierte Paare (z. B. `source_unreachable`, wenn eine Quelle vom Kali
 aus tot ist) erscheinen separat als `instant` und blähen die Rate nicht auf.
 
-Die Ausgabe ist **farbcodiert** (sofern stderr ein Terminal ist; `NO_COLOR=1`
-deaktiviert Farben, `run.log` ist immer ungefärbt): `auth_ok` grün, `auth_fail`
-gelb, Timeouts/Unreachable rot usw. – sowohl in den Log-Zeilen als auch als
-Live-Zähler im Fortschrittsbalken (z. B. `OK:123 AUTH:5 UNREACH:3`).
+### TUI (seit v2.0, btop-artig)
 
-### Pause-Menü zur Laufzeit (1× Ctrl+C)
-
-Während des Laufs öffnet **1× Ctrl+C** ein interaktives Menü (die Worker
-laufen weiter). Im Menü selbst zeigt **1× Ctrl+C** nur einen Hinweis und
-lässt das Menü offen — erst **2× Ctrl+C hintereinander** bricht hart ab
-(Exit 130):
+Läuft das Skript in einem Terminal und ist `textual` installiert, startet
+automatisch die **TUI** (erzwingen mit `--tui`, deaktivieren mit `--no-tui`):
 
 ```
-=== Pause-Menue ===
-  s     Stop (sauber herunterfahren, Resume-faehig)
-  r     Zwischenbericht
-  w N   Worker auf N setzen (aktuell 2)
-  t N   Timeout auf N Sekunden (aktuell 10)
-  q N   Subnetz-Quota auf N (aktuell 3)
-  m M   Quota-Modus auth_ok|reachable (aktuell auth_ok)
-  v L   Verbosity err|warn|info (aktuell info)
-  c     Weiter
-  ctrl-c  1x Hinweis / 2x hintereinander = hart abbrechen (Exit 130)
-menu>
+┌ SSH-Matrix-Tester v2.0.0 ───────────────┐
+│ STATUS                    │ SETTINGS     │
+│ ██████░░ 18.342/12.648.692│ Worker 5 [w] │
+│ ETA 2h 05m · 2,3 Tests/s  │ Timeout 10   │
+│ OK 12.042 · SRCERR 5.980  │ Quota 1      │
+├───────────────────────────┼──────────────┤
+│ GRAPHEN ─·─·──·─ pairs/s  │ LOG          │
+│ ▁▃▅▂▇▃▁ real-tests/s      │ 14:02:12 ... │
+│ ▂▂▄▄▆▅▇ aktive Threads    │              │
+├───────────────────────────┴──────────────┤
+│ s=Stop r=Report p=Pause w/t/q/m/v=Settings
+└──────────────────────────────────────────┘
 ```
 
-- **`s`** stoppt sauber: Worker beenden den aktuellen Test, die restlichen
-  Paare bleiben ungeschrieben → `--resume` testet sie beim nächsten Lauf.
-- **`r`** zeigt einen sprechenden, farbigen Zwischenbericht: Fortschritt +
-  ETA, Status-Verteilung mit Klartext-Erklärung (z. B. „Login abgelehnt –
-  SSH-Port offen, aber Passwort/User falsch") und Subnetz-Erreichbarkeit
-  (bestätigte Richtungen vs. Richtungen mit Lücken).
-- **`w N` / `t N` / `q N` / `m M` / `v L`** ändern Parameter zur Laufzeit; die
-  Wirkung greift für noch nicht getestete Paare (`v L` = Verbosity der
-  Terminal-Ausgabe, `err|warn|info`). `w 0` pausiert die Arbeit
-  komplett (alle Worker beenden sich nach dem aktuellen Test), `w N` mit
-  N>0 nimmt sie wieder auf.
+- **Panes**: Status (Fortschritt, ETA, kumulative Status-Tabelle), Settings
+  (Worker/Timeout/Quota/Modus/Verbosity), Graphen (pairs/s, real-tests/s,
+  aktive Threads als Sparklines), Log (farbige Log-Zeilen).
+- **Tasten**: `s` Stop, `q` Quit, `r` Report-Overlay (kumulativer
+  Zwischenbericht), `p` Pause/Weiter, `w/t/q/m/v` Settings ändern (Eingabe-
+  Modal), `ctrl+c`/`ctrl+q` Beenden.
+- **Abbrechen-Warnung**: Stop/Quit verlangen eine Bestätigung
+  (`j`=Ja, `n`/`Esc`=Nein) — kein versehentlicher Abbruch.
+- `run.log` bleibt immer vollständig; die Log-Zeilen erscheinen zusätzlich
+  im Log-Pane.
+
+### CLI-Modus (vereinfacht, `--no-tui`)
+
+Ohne Terminal (Pipe, Automation) oder mit `--no-tui` läuft der vereinfachte
+CLI-Modus: Log-Zeilen wie gehabt plus ein **periodischer Status-Einzeiler**
+(Default alle 30 s, `--status-interval N`, 0 = aus):
+
+```
+[14:02:30] 18.342/12.648.692 (0,15 %) · 2,3/s · ETA 2h 05m · OK:12042 SRCERR:5980
+```
+
+**1× Ctrl+C** stoppt sauber (Worker beenden den aktuellen Test, Rest bleibt
+für `--resume` erhalten, Exit 0); **2× Ctrl+C** bricht hart ab (Exit 130).
 
 ### Neue IPs hinzufügen (inkrementell)
 
@@ -212,7 +225,10 @@ A auf A's Port; von A aus wird B auf B's Port getestet (`ssh -p <B_port>`).
 | `--user USER` | – (Pflicht) | SSH-User, gilt für alle IPs |
 | `--pass-env NAME` | `SSHPASS` | Env-Variable mit Passwort (empfohlen) |
 | `--pass-file FILE` | – | Datei, 1. Zeile = Passwort (Alternative) |
-| `--verbose LEVEL` | `info` | Detailgrad der Terminal-Ausgabe: `err` (nur Fehler), `warn` (Fehler + Warnungen), `info` (alles). `run.log` bleibt immer vollständig — nützlich, wenn Log-Zeilen das Pause-Menü stören. |
+| `--verbose LEVEL` | `info` | Detailgrad der Terminal-Ausgabe im CLI-Modus: `err` (nur Fehler), `warn` (Fehler + Warnungen), `info` (alles). `run.log` bleibt immer vollständig. |
+| `--tui` | auto | TUI (Textual) erzwingen; ohne Flag Auto-Detect (TTY + textual installiert) |
+| `--no-tui` | – | TUI deaktivieren, CLI-Modus erzwingen |
+| `--status-interval N` | `30` | CLI: periodischer Status-Einzeiler alle N Sekunden (0 = aus) |
 | `--force` | aus | RAM-Warnung (Schätzung über Schwelle, Default 1 GB) ohne Nachfrage überschreiben |
 | `--port-default N` | `22` | Default-Port für Einträge ohne `:PORT` |
 | `--workers N` | `20` | Parallele Quell-IPs |

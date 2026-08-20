@@ -291,3 +291,39 @@ Resume/Retry-Datenhaltung wurden umgestellt.
 **Abgewogen:** `done` als Set von Int-Tupeln (~60 B/Paar) wäre einfacher
 gewesen, bleibt aber O(n²) (bei 12,6 Mio. Paaren ~760 MB). Das Bitmap ist
 ~500× kleiner bei gleicher O(1)-Abfrage.
+
+---
+
+## 17. TUI (Textual) statt tqdm-Bar + Pause-Menü (v2.0.0)
+
+**Entscheidung:** v2.0 bringt eine **Textual-TUI** (Panes: Status, Settings,
+Graphen, Log; Modal-Bestätigung für Stop/Quit) mit Auto-Detect (TTY +
+textual installiert → TUI; `--tui`/`--no-tui` zum Erzwingen). Der CLI-Modus
+wurde vereinfacht: tqdm und das Ctrl+C-Menü sind entfernt, stattdessen
+Log-Zeilen + periodischer Status-Einzeiler (`--status-interval`); 1× Ctrl+C
+= sauberer Stop (resume-fähig), 2× = hart. `Progress` wurde zu `RunStats`
+(thread-sichere Statistik mit Historie für Graphen).
+
+**Begründung:**
+- Die tqdm-Bar wurde durch Menü-Output zerstört und war bei riesigen Totals
+  (0 %-Anzeige) kaum lesbar. Eine echte TUI mit Panes löst beides sauber:
+  die Log-Zeilen wandern ins Log-Pane, die Status-Zeile ins Status-Pane,
+  und Stop/Quit laufen über ein Bestätigungs-Modal (Anforderung
+  „Warnung beim Abbrechen").
+- **Textual statt Rich-Live/curses**: btop-artige Optik (Sparklines,
+  Panes, Modals, Key-Bindings) mit wenig Eigenbau. Apt-Version (0.1.13)
+  ist veraltet → pip-Installation; CLI bleibt davon unabhängig (lazy
+  Import, tqdm entfällt als Abhängigkeit).
+- **Auto-Detect statt Flag-Pflicht**: interaktive Nutzung bekommt die TUI
+  automatisch; Pipes/Automation laufen unverändert im CLI-Modus.
+- **CLI vereinfacht statt beibehalten**: zwei parallele Interaktionspfade
+  (Menü + TUI) wären Wartungslast; der Einzeiler + sauberer Ctrl+C-Stop
+  deckt Automation und schnelle Läufe ab.
+- **Worker-Architektur unverändert**: Queue + Consumer (v1.2.0) und die
+  Bitmaps (v1.2.3) bleiben; die TUI ist nur eine neue Anzeige-Ebene über
+  `RunStats`.
+
+**Erkanntes Problem beim Umbau:** `threading.Lock` ist nicht reentrant —
+`maybe_print_status` hielt den Lock und rief `status_line()` auf, das ihn
+erneut erwarb (Deadlock). Gelöst über `_status_line_locked()` (Lock muss
+schon gehalten sein).

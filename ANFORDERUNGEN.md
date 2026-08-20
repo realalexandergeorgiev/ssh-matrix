@@ -38,7 +38,7 @@ CSV und Excel-Report aufbereitet.
 | FR-14 | S | `--subnet-quota N`: pro Richtung (`src_net → tgt_net`) werden nach N funktionierenden Quell-Hosts die restlichen Paare als `skipped` übersprungen. `--quota-mode` wählt, was zählt: `auth_ok` (nur voller Login) oder `reachable` (netzwerkseitig erreichbar: `auth_ok`, `auth_fail`, `port_open`). |
 | FR-15 | S | Intelligentes Subnetz-Grouping per **Gap-Clustering** (`--subnet-gap`, Default 16): Netze werden aus der IP-Verteilung geschätzt, nicht starr als /24 angenommen. `--subnet-gap 0` = feste /24. |
 | FR-16 | S | **Netz-Matrix**: Subnetz-Pivot (Zeilen = Quell-Netze, Spalten = Ziel-Netze) als Sheet + `netz_matrix.csv`, Zellen `ok/tested` mit Farbcodierung. |
-| FR-17 | K | Farbcodierte Terminal-Ausgabe (Log-Zeilen + Live-Status-Zähler im Fortschrittsbalken), nur bei TTY, `NO_COLOR=1` deaktiviert. |
+| FR-17 | K | **TUI (Textual)** mit Status-, Settings-, Graphen- und Log-Pane; Stop/Quit nur nach Bestätigung. CLI-Modus: farbige Log-Zeilen + periodischer Status-Einzeiler, 1× Ctrl+C = sauberer Stop. |
 | FR-18 | K | `--limit-pairs N` für Trockenläufe (nur die ersten N Paare testen). |
 | FR-19 | K | IP-Abfrage-Werkzeug (`ssh_matrix_query.py` geplant/optional): für eine IP alle Ziele bzw. alle Quellen anzeigen (HTML + CLI). |
 
@@ -48,7 +48,7 @@ CSV und Excel-Report aufbereitet.
 
 | ID | Priorität | Anforderung |
 |---|---|---|
-| NFR-1 | M | Läuft auf **Kali Linux** (Python ≥ 3.10) mit `paramiko`, `openpyxl`, `tqdm`. |
+| NFR-1 | M | Läuft auf **Kali Linux** (Python ≥ 3.10) mit `paramiko`, `openpyxl`; für die TUI zusätzlich `textual` (pip). |
 | NFR-2 | M | **Keine dauerhafte Modifikation der Zielsysteme**: kein SSH-Key-Deploy, keine authorized_keys-Änderungen. Einzige Datei auf Zielen: temporäres askpass-Skript in `/tmp` oder `/dev/shm` (Mode 700), wird sofort gelöscht. |
 | NFR-3 | M | **Passwort-Sicherheit**: nie als CLI-Argument (sonst in `ps` sichtbar); nur Umgebungsvariable oder Datei. Auf Ziel A steht das Passwort nur in der Umgebungsvariable des ssh-Prozesses (nicht in der /tmp-Datei). |
 | NFR-4 | M | **Skalierung**: ~48.000 Tests (220 IPs) in realistischer Zeit (ca. 2,5–3,5 h bei Defaults); sanfte Parallelität zur Vermeidung von fail2ban/Rate-Limits. |
@@ -56,7 +56,7 @@ CSV und Excel-Report aufbereitet.
 | NFR-6 | M | IPv4-only (keine IPv6-Unterstützung). |
 | NFR-7 | S | Der Test führt auf Ziel B **nur** `echo CONN_OK_…` aus — keine Systemänderung. |
 | NFR-8 | S | Keine known_hosts-Verschmutzung: `StrictHostKeyChecking=no`, `UserKnownHostsFile=/dev/null`. Host-Key-Änderungen werden bewusst ignoriert. |
-| NFR-9 | S | Fortschrittsanzeige ehrlich: Resume-Offset (`done/total`), Rate nur aus echten SSH-Tests (`real/s`), `instant`-Zähler für sofort abgeschlossene Paare. |
+| NFR-9 | S | Fortschrittsanzeige ehrlich: Resume-Offset (`done/total`), Rate nur aus echten SSH-Tests (`/s`), `instant`-Zähler für sofort abgeschlossene Paare. |
 | NFR-10 | K | `run.log` mit Laufprotokoll (Tool-Erkennung, Reconnects, Warnungen). |
 
 ---
