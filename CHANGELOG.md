@@ -5,6 +5,38 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v1.2.3] (2026-08-20) — RAM-Optimierung (Streaming statt O(n²))
+
+### Behoben
+- **Riesiger RAM-Verbrauch bei großen IP-Listen**: Für 3557 Endpunkte
+  (12,6 Mio. Paare) stieg der Speicher auf mehrere GB und blieb dort.
+  Vier O(n²)-Strukturen wurden eliminiert:
+  - `pairs`-Liste (2er-Tupel, ~800 MB) → entfällt komplett; Worker
+    iterieren die Hosts direkt (Tasks sind nur noch `(src_id, id_range)`)
+  - `pairs_before_filter`-Kopie (~100 MB) → entfällt; `total` wird
+    arithmetisch berechnet, `initial` im Streaming-Pass mitgezählt
+  - `done`-Set aus `detail.csv` bei `--resume` (~2–3 GB) → **Bitmap**
+    (`PairBits`, 1 Bit/Paar): bei 3557 Endpunkten nur ~1,6 MB
+  - `by_source`-Ziel-Listen/`tasks`/Queue (~200–400 MB) → nur noch n
+    kleine Tasks
+- **Gemessen (3557 Endpunkte, separater Prozess):** vorher ~1000 MB,
+  nachher **~34 MB Peak** (inkl. Python/paramiko-Basis).
+- `direction_working` (Subnetz-Quota) wird auf `quota` Einträge pro
+  Richtung gekappt (nur die Länge zählt) — auch beim Laden aus
+  `detail.csv`. Mit `--subnet-quota 1`: praktisch 0 RAM.
+- `prune_detail` (Retry) lädt keine Zeilenliste mehr, sondern streamt:
+  Retry-Paare als drittes Bitmap, Neu-Schreiben in einem Pass.
+- `--limit-pairs` als `in_scope`-Bitmap (gleiche Semantik: erste N Paare
+  in a-, dann b-Reihenfolge).
+
+### Hinzugefügt
+- **RAM-Warnung**: `estimate_ram_mb()` schätzt den Spitzenverbrauch
+  (Streaming-Architektur, linear statt n²). Über der Schwelle
+  (Default 1 GB, per `SSH_MATRIX_RAM_WARN_MB` anpassbar) erscheint eine
+  WARNING und es wird explizit gefragt: „Trotzdem fortfahren? [j/N]".
+  Ohne Terminal (Pipe) wird abgebrochen; `--force` überschreibt die
+  Nachfrage.
+
 ## [v1.2.2] (2026-08-20) — Optionaler Log-Detailgrad (--verbose)
 
 ### Hinzugefügt
@@ -221,6 +253,7 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   `StrictHostKeyChecking=no`, keine known_hosts-Verschmutzung,
   Temp-Dateien auf Zielen sofort gelöscht
 
+[v1.2.3]: ./README.md
 [v1.2.2]: ./README.md
 [v1.2.1]: ./README.md
 [v1.2.0]: ./README.md

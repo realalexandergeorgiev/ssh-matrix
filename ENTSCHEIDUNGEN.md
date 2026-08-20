@@ -263,3 +263,31 @@ Config liest. Ein `stop_event` wird im Worker-Loop vor jedem Test geprüft.
   bewerten können soll; Farben folgen den bestehenden Status-Farben.
 - Ctrl+C als Trigger statt Keypress-Listener: keine Extra-Abhängigkeit,
   funktioniert über SSH, und „2× Ctrl+C = hart" ist ein vertrautes Muster.
+
+---
+
+## 16. RAM-Optimierung: Streaming statt O(n²) (v1.2.3)
+
+**Entscheidung:** Die O(n²)-Strukturen wurden durch Streaming + Bitmaps
+ersetzt:
+- Keine `pairs`-Liste mehr — Tasks sind nur `(src_id, id_range)`, der
+  Worker iteriert die Hosts direkt und filtert per Bitmap.
+- `done`-Set (Resume) → **`PairBits`**-Bitmap (1 Bit/Paar).
+- `--limit-pairs` und Retry-Paare ebenfalls als Bitmaps; `prune_detail`
+  streamt (keine Zeilenliste mehr).
+- `direction_working` wird auf `quota` Einträge pro Richtung gekappt.
+- `estimate_ram_mb()` schätzt den Bedarf; über 1 GB (env-überschreibbar)
+  Warnung + explizite `j/N`-Abfrage, `--force` überschreibt.
+
+**Gemessen (3557 Endpunkte, 12,6 Mio. Paare, separater Prozess):**
+vorher ~1000 MB, nachher ~34 MB Peak. Begründung: die Paarmenge ist
+**n²** — jede materialisierte Struktur (Tupel-Liste, Set mit Strings,
+Ziel-Listen) skaliert quadratisch und blieb den ganzen Lauf im RAM. Ein
+Bitmap pro Paar ist nur 1 Bit (n²/8 Bytes) und damit selbst bei 50.000
+Endpunkten unkritisch (~312 MB). Die Worker-Architektur (Queue +
+Consumer, v1.2.0) blieb unverändert — nur die Task-Inhalte und die
+Resume/Retry-Datenhaltung wurden umgestellt.
+
+**Abgewogen:** `done` als Set von Int-Tupeln (~60 B/Paar) wäre einfacher
+gewesen, bleibt aber O(n²) (bei 12,6 Mio. Paaren ~760 MB). Das Bitmap ist
+~500× kleiner bei gleicher O(1)-Abfrage.

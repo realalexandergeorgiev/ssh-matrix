@@ -208,6 +208,7 @@ A auf A's Port; von A aus wird B auf B's Port getestet (`ssh -p <B_port>`).
 | `--pass-env NAME` | `SSHPASS` | Env-Variable mit Passwort (empfohlen) |
 | `--pass-file FILE` | – | Datei, 1. Zeile = Passwort (Alternative) |
 | `--verbose LEVEL` | `info` | Detailgrad der Terminal-Ausgabe: `err` (nur Fehler), `warn` (Fehler + Warnungen), `info` (alles). `run.log` bleibt immer vollständig — nützlich, wenn Log-Zeilen das Pause-Menü stören. |
+| `--force` | aus | RAM-Warnung (Schätzung über Schwelle, Default 1 GB) ohne Nachfrage überschreiben |
 | `--port-default N` | `22` | Default-Port für Einträge ohne `:PORT` |
 | `--workers N` | `20` | Parallele Quell-IPs |
 | `--timeout N` | `10` | Timeout je Hop (Connect/Auth/Befehl) in s |
@@ -380,6 +381,26 @@ Tendenzen:
 
 Mit `--limit-pairs 50` lässt sich der Ablauf vorab an ein paar Paaren
 verifizieren (Trockenlauf).
+
+### RAM-Verbrauch (seit v1.2.3 stark reduziert)
+
+Das Skript arbeitet **streaming** statt O(n²)-Strukturen im Speicher zu
+halten: keine `pairs`-Liste, `done`-Set als **Bitmap** (1 Bit/Paar),
+Retry/`--limit-pairs` ebenfalls als Bitmaps. Gemessener Spitzenverbrauch
+(separater Prozess):
+
+| Endpunkte | Paare | vor v1.2.3 | ab v1.2.3 |
+|---|---|---|---|
+| 220 | 48.180 | ~39 MB | ~35 MB |
+| 1.000 | 999.000 | ~107 MB | ~36 MB |
+| 3.557 | 12,6 Mio. | **~1000 MB** | **~34 MB** |
+
+Vor dem Start schätzt das Skript den Bedarf; über der Schwelle (Default
+**1 GB**, per `SSH_MATRIX_RAM_WARN_MB` anpassbar) erscheint eine Warnung
+mit expliziter Nachfrage **„Trotzdem fortfahren? [j/N]"** (ohne Terminal
+wird abgebrochen; `--force` überschreibt die Nachfrage). Die
+Schätzung bleibt bewusst konservativ, da die Streaming-Architektur den
+Verbrauch praktisch linear hält.
 
 ---
 

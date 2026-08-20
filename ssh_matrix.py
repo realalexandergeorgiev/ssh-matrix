@@ -62,8 +62,20 @@ KNOWN_STATUSES = {
 RETRY_ALL_EXCLUDE = {"auth_ok", "skipped"}
 SUCCESS_STATUSES = {"auth_ok"}
 
-VERSION = "v1.2.2"
+VERSION = "v1.2.3"
 AUTHOR = "Alex & DeepSeek"
+
+# RAM-Warnschwelle in MB (per env ueberschreibbar, z.B. fuer Tests).
+RAM_WARN_MB = int(os.environ.get("SSH_MATRIX_RAM_WARN_MB", "1024"))
+
+
+def estimate_ram_mb(n: int, with_resume: bool) -> float:
+    """Grobe Schaetzung des Spitzen-RAM in MB. Streaming-Architektur:
+    kein O(n^2)-Speicher mehr (Bitmaps statt pairs-Liste/done-Set)."""
+    mb = 60.0                 # Python + paramiko + App-Basis
+    mb += n * 0.002           # hosts + id-Map
+    mb += (n * n) / 8 / 1e6   # done-Bitmap (1 Bit/Paar)
+    return mb
 
 
 def print_banner(stream=sys.stderr) -> None:
@@ -699,70 +711,120 @@ def make_row(src: dict, tgt: dict, method: str, status: str,
     ]
 
 
-def pair_key(pair) -> tuple:
-    src, tgt = pair
-    return (src["ip"], src["port"], tgt["ip"], tgt["port"])
+class PairBits:
+    """Bitmap ueber alle geordneten Paare (src_id, tgt_id) - 1 Bit/Paar.
+    Ersetzt die O(n^2)-Speicherstrukturen (pairs-Liste, done-Set): bei
+    3557 Endpunkten (12,6 Mio. Paare) nur ~1,6 MB statt mehrerer GB."""
+
+    def __init__(self, n: int):
+        self.n = n
+        self.bits = bytearray((n * n + 7) // 8)
+
+    def set(self, src_id: int, tgt_id: int) -> None:
+        idx = src_id * self.n + tgt_id
+        self.bits[idx >> 3] |= 1 << (idx & 7)
+
+    def get(self, src_id: int, tgt_id: int) -> bool:
+        idx = src_id * self.n + tgt_id
+        return bool(self.bits[idx >> 3] & (1 << (idx & 7)))
 
 
-def load_completed(detail_path: str) -> set:
-    done = set()
+def build_in_scope(n: int, limit: int):
+    """Bitmap der ersten `limit` geordneten Paare (a-, dann b-Reihenfolge).
+    None = alle Paare im Scope (kein --limit-pairs)."""
+    if limit <= 0 or limit >= n * (n - 1):
+        return None
+    bits = PairBits(n)
+    count = 0
+    for a in range(n):
+        for b in range(n):
+            if a == b:
+                continue
+            if count >= limit:
+                return bits
+            bits.set(a, b)
+            count += 1
+    return bits
+
+
+def stream_detail(detail_path: str, id_of: dict, n: int, in_scope, done_bits,
+                  retry_statuses, retry_bits, quota: int, quota_statuses: set,
+                  direction_working, log) -> int:
+    """Ein Streaming-Pass ueber detail.csv (keine Zeilenliste im RAM):
+    - done_bits        : getestete Paare markieren (dedupliziert)
+    - initial (Return) : Anzahl in-scope bereits getesteter Paare (dedupliziert)
+    - retry_bits       : Paare mit Status in retry_statuses (falls gesetzt)
+    - direction_working: Quell-IPs je Richtung (auf quota gekappt)
+    """
+    initial = 0
     if not os.path.exists(detail_path):
-        return done
+        return 0
     with open(detail_path, newline="", encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
-            done.add((row["source_ip"], int(row["source_port"]),
-                      row["target_ip"], int(row["target_port"])))
-    return done
+            try:
+                s = id_of.get((row["source_ip"], int(row["source_port"])))
+                t = id_of.get((row["target_ip"], int(row["target_port"])))
+            except (KeyError, ValueError):
+                continue
+            if s is None or t is None or s == t:
+                continue
+            st = row["status"]
+            if not done_bits.get(s, t):
+                done_bits.set(s, t)
+                if in_scope is None or in_scope.get(s, t):
+                    initial += 1
+            if retry_bits is not None and st in retry_statuses:
+                retry_bits.set(s, t)
+            if quota > 0 and st in quota_statuses:
+                s_net = row.get("src_net") or row.get("src_24", "")
+                t_net = row.get("tgt_net") or row.get("tgt_24", "")
+                if s_net and t_net:
+                    dw = direction_working[(s_net, t_net)]
+                    if len(dw) < quota:  # nur die Laenge zaehlt -> kappen
+                        dw.add(row["source_ip"])
+    return initial
 
 
-def prune_detail(detail_path: str, retry_statuses: set, current_keys: set,
-                 log) -> tuple[set, int]:
-    """Entfernt Paare aus detail.csv, deren Last-Status in retry_statuses ist
-    und die noch in der aktuellen IP-Liste (current_keys) vorkommen. Paare von
-    IPs, die nicht mehr in der Liste stehen, bleiben unangetastet.
-
-    Return: (done_set, anzahl_entfernter_Paare). detail.csv wird atomar neu
-    geschrieben (Temp-Datei + Rename)."""
+def prune_detail(detail_path: str, retry_statuses: set, id_of: dict, n: int,
+                 log) -> int:
+    """Entfernt Retry-Paare atomar aus detail.csv (streaming, kein RAM).
+    Return: Anzahl entfernter Paare. Paare von IPs, die nicht mehr in der
+    aktuellen Liste stehen, bleiben unangetastet."""
     if not os.path.exists(detail_path):
         log.error("--retry-status/--retry-all-failed braucht eine vorhandene "
                   "detail.csv (%s)", detail_path)
         sys.exit(2)
 
+    retry_bits = PairBits(n)
     with open(detail_path, newline="", encoding="utf-8") as fh:
-        rows = list(csv.DictReader(fh))
-    if not rows:
-        log.warning("detail.csv ist leer - nichts zu retryen")
-        return set(), 0
+        for row in csv.DictReader(fh):
+            try:
+                s = id_of.get((row["source_ip"], int(row["source_port"])))
+                t = id_of.get((row["target_ip"], int(row["target_port"])))
+            except (KeyError, ValueError):
+                continue
+            if s is not None and t is not None and s != t \
+                    and row["status"] in retry_statuses:
+                retry_bits.set(s, t)
 
-    # Last-Status pro Paar (letzte Vorkommen gewinnt).
-    last_status = {}
-    for r in rows:
-        key = (r["source_ip"], int(r["source_port"]),
-               r["target_ip"], int(r["target_port"]))
-        last_status[key] = r["status"]
-
-    retry_pairs = {
-        key for key, st in last_status.items()
-        if st in retry_statuses and key in current_keys
-    }
-
-    keep = [r for r in rows
-            if ((r["source_ip"], int(r["source_port"]),
-                 r["target_ip"], int(r["target_port"])) not in retry_pairs)]
-
-    # Atomar neu schreiben: Temp-Datei + Rename.
+    pruned = 0
     tmp = detail_path + ".tmp"
-    with open(tmp, "w", newline="", encoding="utf-8") as fh:
-        w = csv.DictWriter(fh, fieldnames=CSV_HEADER)
+    with open(detail_path, newline="", encoding="utf-8") as fh, \
+            open(tmp, "w", newline="", encoding="utf-8") as fh2:
+        w = csv.DictWriter(fh2, fieldnames=CSV_HEADER, restval="")
         w.writeheader()
-        w.writerows(keep)
+        for row in csv.DictReader(fh):
+            try:
+                s = id_of.get((row["source_ip"], int(row["source_port"])))
+                t = id_of.get((row["target_ip"], int(row["target_port"])))
+            except (KeyError, ValueError):
+                s = t = None
+            if s is not None and t is not None and s != t and retry_bits.get(s, t):
+                pruned += 1
+                continue
+            w.writerow(row)
     os.replace(tmp, detail_path)
-
-    done = {
-        (r["source_ip"], int(r["source_port"]),
-         r["target_ip"], int(r["target_port"])) for r in keep
-    }
-    return done, len(retry_pairs)
+    return pruned
 
 
 class CsvWriter:
@@ -854,15 +916,58 @@ def chunk_list(lst: list, n: int) -> list:
     return [lst[i:i + k] for i in range(0, len(lst), k)]
 
 
-def worker(src, targets, config, user, password, writer, lock, progress,
-           direction_working, stop_event, log) -> tuple:
+def id_chunks(n: int, k: int):
+    """(start, end)-Bereiche ueber die Host-Indizes 0..n-1 in k Chunks."""
+    if k <= 1:
+        yield (0, n)
+        return
+    chunk = max(1, -(-n // k))
+    for start in range(0, n, chunk):
+        yield (start, min(start + chunk, n))
+
+
+class RunContext:
+    """Geteilte Lauf-Strukturen (Hosts + Bitmaps) fuer Worker/Consumer/Menue."""
+
+    def __init__(self, hosts: list, scope_bits, done_bits: PairBits):
+        self.hosts = hosts
+        self.scope_bits = scope_bits
+        self.done_bits = done_bits
+
+
+def iter_targets(ctx, src_id: int, id_range: tuple) -> iter:
+    """Alle Ziele einer Quelle im id_range, gefiltert nach Scope/Resume."""
+    hosts, scope_bits, done_bits = ctx.hosts, ctx.scope_bits, ctx.done_bits
+    for tgt_id in range(id_range[0], id_range[1]):
+        if tgt_id == src_id:
+            continue
+        if scope_bits is not None and not scope_bits.get(src_id, tgt_id):
+            continue
+        if done_bits.get(src_id, tgt_id):
+            continue
+        yield hosts[tgt_id]
+
+
+def skip_first(it: iter, k: int) -> iter:
+    for i, item in enumerate(it):
+        if i >= k:
+            yield item
+
+
+def worker(src_id, id_range, ctx, config, user, password, writer, lock,
+           progress, direction_working, stop_event, log) -> tuple:
+    src = ctx.hosts[src_id]
+
+    def targets_iter():
+        return iter_targets(ctx, src_id, id_range)
+
     tester = SourceTester(src, user, password, config)
     ok, err = tester.connect()
     if not ok:
         with lock:
             n_skipped = 0
             n_srcerr = 0
-            for tgt in targets:
+            for tgt in targets_iter():
                 if config.subnet_quota > 0:
                     direction = (src["net"], tgt["net"])
                     if len(direction_working[direction]) >= config.subnet_quota:
@@ -878,19 +983,18 @@ def worker(src, targets, config, user, password, writer, lock, progress,
             if n_srcerr:
                 progress.update(n_srcerr, instant=True, status="source_unreachable")
         log.warning("Quelle %s:%s nicht erreichbar: %s", src["ip"], src["port"], err)
-        return (src["ip"], src["port"]), len(targets), 0
+        return src_id, n_skipped + n_srcerr, 0
 
     tester.detect_tools()
     log.info("Quelle %s:%s verbunden, Tools: %s", src["ip"], src["port"],
              {k: v for k, v in tester.tools.items() if v})
 
     consec = 0
-    done = 0
-    while done < len(targets):
+    processed = 0
+    for tgt in targets_iter():
         # Stop angefordert? Restliche Ziele ungeschrieben lassen -> Resume.
         if stop_event.is_set():
             break
-        tgt = targets[done]
 
         # Subnetz-Quota: Richtung schon ausreichend getestet?
         if config.subnet_quota > 0:
@@ -900,7 +1004,7 @@ def worker(src, targets, config, user, password, writer, lock, progress,
                     writer.writerow(make_row(src, tgt, "quota_skip", "skipped", 0, ""))
                     writer.flush()
                     progress.update(1, instant=True, status="skipped")
-                    done += 1
+                    processed += 1
                     continue
 
         res = tester.test_target(tgt)
@@ -910,7 +1014,9 @@ def worker(src, targets, config, user, password, writer, lock, progress,
             writer.flush()
             progress.update(1, status=res["status"])
             if config.subnet_quota > 0 and res["status"] in config.quota_statuses:
-                direction_working[(src["net"], tgt["net"])].add(src["ip"])
+                dw = direction_working[(src["net"], tgt["net"])]
+                if len(dw) < config.subnet_quota:  # nur Laenge zaehlt -> kappen
+                    dw.add(src["ip"])
         if res["status"] == "tool_error" and not res["error"]:
             consec += 1
         else:
@@ -919,28 +1025,29 @@ def worker(src, targets, config, user, password, writer, lock, progress,
             log.warning("Quelle %s:%s: Verbindung scheint tot, Reconnect", src["ip"], src["port"])
             ok, err = tester.reconnect()
             if not ok:
-                rest = targets[done + 1:]
-                if rest:
-                    with lock:
-                        for r in rest:
-                            writer.writerow(make_row(src, r, "connect",
-                                                     "source_unreachable", 0, err))
-                        writer.flush()
-                        progress.update(len(rest), instant=True, status="source_unreachable")
-                    log.warning("Reconnect fehlgeschlagen, %d Ziele als "
-                                "source_unreachable markiert", len(rest))
+                with lock:
+                    n_rest = 0
+                    for r in skip_first(targets_iter(), processed + 1):
+                        writer.writerow(make_row(src, r, "connect",
+                                                 "source_unreachable", 0, err))
+                        n_rest += 1
+                    writer.flush()
+                    if n_rest:
+                        progress.update(n_rest, instant=True, status="source_unreachable")
+                log.warning("Reconnect fehlgeschlagen, %d Ziele als "
+                            "source_unreachable markiert", n_rest)
                 break
             consec = 0
-        done += 1
+        processed += 1
 
     tester.cleanup()
-    return (src["ip"], src["port"]), done, 0
+    return src_id, processed, 0
 
 
 # ---------------------------------------------------------------- Worker-Pool
 
 def consumer(work_queue, config, stop_event, user, password, writer, lock,
-             progress, direction_working, log):
+             progress, direction_working, log, ctx):
     """Ein Consumer-Thread: zieht Tasks aus der Queue und fuehrt sie aus.
     Beendet sich bei Stop, bei leerer Queue oder wenn ueberzaehlig
     (Worker-Anpassung im Pause-Menue)."""
@@ -951,16 +1058,16 @@ def consumer(work_queue, config, stop_event, user, password, writer, lock,
                 config.active_workers -= 1
                 return
         try:
-            src, targets = work_queue.get(timeout=0.5)
+            src_id, id_range = work_queue.get(timeout=0.5)
         except queue.Empty:
             with config.lock:
                 config.active_workers -= 1
             return
         try:
-            worker(src, targets, config, user, password, writer, lock,
-                   progress, direction_working, stop_event, log)
+            worker(src_id, id_range, ctx, config, user, password, writer,
+                   lock, progress, direction_working, stop_event, log)
         except Exception as exc:
-            log.exception("Worker-Fehler fuer Quelle %s", src["ip"])
+            log.exception("Worker-Fehler fuer Quelle %s", ctx.hosts[src_id]["ip"])
         finally:
             work_queue.task_done()
     with config.lock:
@@ -968,7 +1075,7 @@ def consumer(work_queue, config, stop_event, user, password, writer, lock,
 
 
 def spawn_consumers(n, work_queue, config, stop_event, user, password, writer,
-                    lock, progress, direction_working, log):
+                    lock, progress, direction_working, log, ctx):
     """n neue Consumer-Threads starten."""
     for _ in range(n):
         with config.lock:
@@ -976,13 +1083,13 @@ def spawn_consumers(n, work_queue, config, stop_event, user, password, writer,
         threading.Thread(
             target=consumer,
             args=(work_queue, config, stop_event, user, password, writer,
-                  lock, progress, direction_working, log),
+                  lock, progress, direction_working, log, ctx),
             daemon=True,
         ).start()
 
 
 def set_workers(config, n, work_queue, stop_event, user, password, writer,
-                lock, progress, direction_working, log) -> None:
+                lock, progress, direction_working, log, ctx) -> None:
     """Worker-Anzahl zur Laufzeit aendern. Mehr -> spawnen, weniger ->
     ueberschuessige Consumer beenden sich nach ihrem aktuellen Task."""
     if n < 0:
@@ -992,7 +1099,8 @@ def set_workers(config, n, work_queue, stop_event, user, password, writer,
         current = config.active_workers
     if n > current:
         spawn_consumers(n - current, work_queue, config, stop_event, user,
-                        password, writer, lock, progress, direction_working, log)
+                        password, writer, lock, progress, direction_working,
+                        log, ctx)
 
 
 # ---------------------------------------------------------------- Zwischenbericht
@@ -1053,7 +1161,7 @@ def print_interim_report(progress, direction_working, config) -> None:
 # ---------------------------------------------------------------- Pause-Menue
 
 def show_menu(config, progress, direction_working, work_queue, stop_event,
-              user, password, writer, lock, log) -> bool:
+              user, password, writer, lock, log, ctx) -> bool:
     """Pause-Menue. Return True = weiterlaufen, False = Stop."""
     progress.paused = True
     with config.lock:
@@ -1088,7 +1196,7 @@ def show_menu(config, progress, direction_working, work_queue, stop_event,
                 try:
                     set_workers(config, int(parts[1]), work_queue, stop_event,
                                 user, password, writer, lock, progress,
-                                direction_working, log)
+                                direction_working, log, ctx)
                     print(f"Worker-Ziel auf {parts[1]} gesetzt.", file=sys.stderr)
                 except ValueError:
                     print("Ungueltige Zahl.", file=sys.stderr)
@@ -1134,6 +1242,9 @@ def parse_args():
                     help="Detailgrad der Terminal-Ausgabe (stderr): err = nur "
                          "Fehler, warn = Fehler + Warnungen, info = alles "
                          "(Default). run.log bleibt immer vollstaendig.")
+    ap.add_argument("--force", action="store_true",
+                    help="RAM-Warnung (Schaetzung ueber Schwelle, Default 1 GB) "
+                         "ohne Nachfrage ueberschreiben")
     ap.add_argument("--ips", required=True,
                     help="Pfad zur IP-Liste (Format siehe README / ips.txt.example)")
     ap.add_argument("--user", required=True, help="SSH-User (gilt fuer alle IPs)")
@@ -1234,17 +1345,10 @@ def main():
                  args.subnet_quota, args.quota_mode, args.subnet_quota,
                  "/".join(sorted(QUOTA_MODES[args.quota_mode])))
 
-    pairs = [
-        (a, b) for a in hosts for b in hosts
-        if not (a["ip"] == b["ip"] and a["port"] == b["port"])
-    ]
-    log.info("%d geordnete Paare (beide Richtungen)", len(pairs))
-    if args.limit_pairs:
-        pairs = pairs[:args.limit_pairs]
-        log.info("--limit-pairs: teste nur %d Paare", len(pairs))
-    pairs_before_filter = list(pairs)
-
-    detail_path = os.path.join(args.out, "detail.csv")
+    n = len(hosts)
+    id_of = {(h["ip"], h["port"]): i for i, h in enumerate(hosts)}
+    all_pairs = n * (n - 1)
+    log.info("%d geordnete Paare (beide Richtungen)", all_pairs)
 
     # Retry-Flags auswerten (implizieren Resume).
     retry_statuses = None
@@ -1259,40 +1363,64 @@ def main():
             sys.exit(2)
         retry_statuses = (retry_statuses or set()) | requested
 
+    # RAM-Warnung vor dem Start (Schaetzung, Streaming-Architektur).
+    with_resume = bool(args.resume or retry_statuses)
+    est = estimate_ram_mb(n, with_resume)
+    if est > RAM_WARN_MB:
+        log.warning("Geschaetzter RAM-Bedarf ~%d MB fuer %d Endpunkte (%d Paare, "
+                    "resume=%s) - Schwelle %d MB ueberschritten.",
+                    int(est), n, all_pairs, with_resume, RAM_WARN_MB)
+        if not args.force:
+            if not sys.stdin.isatty():
+                log.error("Kein Terminal fuer Bestaetigung - Abbruch "
+                          "(oder --force verwenden).")
+                sys.exit(0)
+            answer = input("Trotzdem fortfahren? [j/N]: ").strip().lower()
+            if answer not in ("j", "ja", "y", "yes"):
+                log.info("Abgebrochen - Speicherwarnung.")
+                sys.exit(0)
+
+    detail_path = os.path.join(args.out, "detail.csv")
+
+    total = all_pairs
+    if args.limit_pairs and 0 < args.limit_pairs < total:
+        total = args.limit_pairs
+        log.info("--limit-pairs: teste nur %d Paare", total)
+    scope_bits = build_in_scope(n, args.limit_pairs)
+
+    direction_working = defaultdict(set)  # (src_net, tgt_net) -> Quell-IPs (auf quota gekappt)
+
     if retry_statuses:
-        current_keys = {pair_key(p) for p in pairs}
-        done, pruned = prune_detail(detail_path, retry_statuses, current_keys, log)
-        before = len(pairs)
-        pairs = [p for p in pairs if pair_key(p) not in done]
-        log.info("--retry-status: %d Paare mit Status %s zum Re-Test markiert, "
-                 "%d verbleiben insgesamt", pruned, ",".join(sorted(retry_statuses)),
-                 len(pairs))
+        pruned = prune_detail(detail_path, retry_statuses, id_of, n, log)
+        log.info("--retry-status: %d Paare mit Status %s zum Re-Test markiert",
+                 pruned, ",".join(sorted(retry_statuses)))
+
+    done_bits = PairBits(n)
+    initial = stream_detail(detail_path, id_of, n, scope_bits, done_bits,
+                            retry_statuses, None,
+                            args.subnet_quota, QUOTA_MODES[args.quota_mode],
+                            direction_working, log)
+    remaining = total - initial
+    if retry_statuses:
+        log.info("--retry-status: %d Paare verbleiben insgesamt (davon %d Re-Test)",
+                 remaining, pruned)
     elif args.resume:
-        done = load_completed(detail_path)
-        before = len(pairs)
-        pairs = [p for p in pairs if pair_key(p) not in done]
         log.info("--resume: %d Paare bereits getestet, %d verbleiben",
-                 before - len(pairs), len(pairs))
-    else:
-        done = set()
-
-    initial = sum(1 for p in pairs_before_filter if pair_key(p) in done)
-    total = len(pairs_before_filter)
-
-    if not pairs:
+                 initial, remaining)
+    if remaining <= 0:
         log.info("Keine Paare mehr zu testen. Report: "
                  "python3 ssh_matrix_report.py --detail %s --out %s", detail_path, args.out)
         sys.exit(0)
 
-    by_source = {}
-    for src, tgt in pairs:
-        by_source.setdefault((src["ip"], src["port"]), []).append(tgt)
-    src_lookup = {(h["ip"], h["port"]): h for h in hosts}
+    if args.subnet_quota > 0 and os.path.exists(detail_path):
+        met = sum(1 for v in direction_working.values() if len(v) >= args.subnet_quota)
+        log.info("--subnet-quota: %d Richtungen aus detail.csv geladen (%d bereits erfuellt)",
+                 len(direction_working), met)
 
     tasks = []
-    for key, targets in by_source.items():
-        for chunk in chunk_list(targets, args.per_source):
-            tasks.append((src_lookup[key], chunk))
+    for src_id in range(n):
+        for (start, end) in id_chunks(n, args.per_source):
+            tasks.append((src_id, (start, end)))
 
     write_mode = "a" if (os.path.exists(detail_path) and os.path.getsize(detail_path) > 0) else "w"
     csvf = open(detail_path, write_mode, newline="", encoding="utf-8")
@@ -1302,18 +1430,7 @@ def main():
         writer.flush()
     lock = threading.Lock()
     progress = Progress(total=total, initial=initial)
-    direction_working = defaultdict(set)  # (src_net, tgt_net) -> set von Quell-IPs mit Erfolg
-    if args.subnet_quota > 0 and os.path.exists(detail_path):
-        with open(detail_path, newline="", encoding="utf-8") as fh:
-            for r in csv.DictReader(fh):
-                if r["status"] in QUOTA_MODES[args.quota_mode]:
-                    s_net = r.get("src_net") or r.get("src_24", "")
-                    t_net = r.get("tgt_net") or r.get("tgt_24", "")
-                    if s_net and t_net:
-                        direction_working[(s_net, t_net)].add(r["source_ip"])
-        met = sum(1 for v in direction_working.values() if len(v) >= args.subnet_quota)
-        log.info("--subnet-quota: %d Richtungen aus detail.csv geladen (%d bereits erfuellt)",
-                 len(direction_working), met)
+    ctx = RunContext(hosts, scope_bits, done_bits)
 
     log.info("Start: %d Aufgaben, %d Worker, timeout=%ds, per-source=%d",
              len(tasks), args.workers, args.timeout, args.per_source)
@@ -1325,7 +1442,7 @@ def main():
     stop_event = threading.Event()
 
     spawn_consumers(args.workers, work_queue, config, stop_event, args.user,
-                    password, writer, lock, progress, direction_working, log)
+                    password, writer, lock, progress, direction_working, log, ctx)
 
     started = time.monotonic()
     try:
@@ -1340,7 +1457,8 @@ def main():
                 # 1x Ctrl+C -> Pause-Menue (Worker laufen weiter);
                 # 'c' kehrt zurueck in die Schleife, 's' stoppt sauber.
                 if not show_menu(config, progress, direction_working, work_queue,
-                                 stop_event, args.user, password, writer, lock, log):
+                                 stop_event, args.user, password, writer, lock,
+                                 log, ctx):
                     log.warning("Stop angefordert - Worker beenden aktuellen Test, "
                                 "Rest bleibt fuer --resume erhalten")
                     break
