@@ -124,6 +124,7 @@ laufen weiter; 2× Ctrl+C bricht hart ab, Exit 130):
   t N   Timeout auf N Sekunden (aktuell 10)
   q N   Subnetz-Quota auf N (aktuell 3)
   m M   Quota-Modus auth_ok|reachable (aktuell auth_ok)
+  v L   Verbosity err|warn|info (aktuell info)
   c     Weiter
 menu>
 ```
@@ -134,8 +135,9 @@ menu>
   ETA, Status-Verteilung mit Klartext-Erklärung (z. B. „Login abgelehnt –
   SSH-Port offen, aber Passwort/User falsch") und Subnetz-Erreichbarkeit
   (bestätigte Richtungen vs. Richtungen mit Lücken).
-- **`w N` / `t N` / `q N` / `m M`** ändern Parameter zur Laufzeit; die
-  Wirkung greift für noch nicht getestete Paare. `w 0` pausiert die Arbeit
+- **`w N` / `t N` / `q N` / `m M` / `v L`** ändern Parameter zur Laufzeit; die
+  Wirkung greift für noch nicht getestete Paare (`v L` = Verbosity der
+  Terminal-Ausgabe, `err|warn|info`). `w 0` pausiert die Arbeit
   komplett (alle Worker beenden sich nach dem aktuellen Test), `w N` mit
   N>0 nimmt sie wieder auf.
 

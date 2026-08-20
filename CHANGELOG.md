@@ -5,6 +5,13 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v1.2.4] (2026-08-20) — Verbosity im Pause-Menü
+
+### Hinzugefügt
+- Menü-Befehl `v LEVEL` (`err|warn|info`): ändert den Detailgrad der
+  Terminal-Ausgabe zur Laufzeit (wirkt sofort auf stderr; `run.log`
+  bleibt immer vollständig). Ungültige Stufen werden abgelehnt.
+
 ## [v1.2.3] (2026-08-20) — RAM-Optimierung (Streaming statt O(n²))
 
 ### Behoben
@@ -253,6 +260,7 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   `StrictHostKeyChecking=no`, keine known_hosts-Verschmutzung,
   Temp-Dateien auf Zielen sofort gelöscht
 
+[v1.2.4]: ./README.md
 [v1.2.3]: ./README.md
 [v1.2.2]: ./README.md
 [v1.2.1]: ./README.md

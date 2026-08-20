@@ -62,7 +62,7 @@ KNOWN_STATUSES = {
 RETRY_ALL_EXCLUDE = {"auth_ok", "skipped"}
 SUCCESS_STATUSES = {"auth_ok"}
 
-VERSION = "v1.2.3"
+VERSION = "v1.2.4"
 AUTHOR = "Alex & DeepSeek"
 
 # RAM-Warnschwelle in MB (per env ueberschreibbar, z.B. fuer Tests).
@@ -102,6 +102,13 @@ QUOTA_MODES = {
     "reachable": {"auth_ok", "auth_fail", "port_open"},
 }
 
+# --verbose Werte -> logging-Level (stderr; run.log bleibt immer INFO).
+LOG_LEVELS = {
+    "err": logging.ERROR,
+    "warn": logging.WARNING,
+    "info": logging.INFO,
+}
+
 # Klartext-Beschreibungen der Status (fuer den Zwischenbericht).
 STATUS_DESCRIPTIONS = {
     "auth_ok": "Volle SSH-Logins erfolgreich - Quelle A konnte sich auf Ziel B anmelden",
@@ -131,6 +138,8 @@ class RunConfig:
         self.quota_mode = args.quota_mode
         self.target_workers = args.workers
         self.active_workers = 0
+        self.verbose_level = args.verbose
+        self.stream_handler = None  # stderr-Handler (fuer --verbose zur Laufzeit)
 
     @property
     def quota_statuses(self) -> set:
@@ -1175,6 +1184,7 @@ def show_menu(config, progress, direction_working, work_queue, stop_event,
         print(f"  {paint(C_GREEN, 't N')}   Timeout auf N Sekunden (aktuell {config.timeout})", file=sys.stderr)
         print(f"  {paint(C_GREEN, 'q N')}   Subnetz-Quota auf N (aktuell {config.subnet_quota})", file=sys.stderr)
         print(f"  {paint(C_GREEN, 'm M')}   Quota-Modus auth_ok|reachable (aktuell {config.quota_mode})", file=sys.stderr)
+        print(f"  {paint(C_GREEN, 'v L')}   Verbosity err|warn|info (aktuell {config.verbose_level})", file=sys.stderr)
         print(f"  {paint(C_GREEN, 'c')}     Weiter", file=sys.stderr)
         print("  ctrl-c  Hart abbrechen (Exit 130)", file=sys.stderr)
         while True:
@@ -1222,6 +1232,16 @@ def show_menu(config, progress, direction_working, work_queue, stop_event,
                     print(f"Quota-Modus auf {mode} gesetzt.", file=sys.stderr)
                 else:
                     print(f"Ungueltiger Modus. Gueltig: {', '.join(QUOTA_MODES)}", file=sys.stderr)
+                continue
+            if c == "v" and len(parts) > 1:
+                level = parts[1].lower()
+                if level in LOG_LEVELS:
+                    config.verbose_level = level
+                    if config.stream_handler is not None:
+                        config.stream_handler.setLevel(LOG_LEVELS[level])
+                    print(f"Verbosity auf {level} gesetzt (stderr).", file=sys.stderr)
+                else:
+                    print(f"Ungueltige Stufe. Gueltig: {', '.join(LOG_LEVELS)}", file=sys.stderr)
                 continue
             if c in ("c", "continue", "weiter"):
                 return True
@@ -1321,8 +1341,7 @@ def main():
     sh = logging.StreamHandler(sys.stderr)
     sh.setFormatter(ColorFormatter("%(asctime)s %(levelname)s %(message)s"))
     # --verbose steuert NUR die stderr-Ausgabe (nicht run.log)
-    sh.setLevel({"err": logging.ERROR, "warn": logging.WARNING,
-                 "info": logging.INFO}[args.verbose])
+    sh.setLevel(LOG_LEVELS[args.verbose])
     log.addHandler(fh)
     log.addHandler(sh)
 
@@ -1436,6 +1455,7 @@ def main():
              len(tasks), args.workers, args.timeout, args.per_source)
 
     config = RunConfig(args)
+    config.stream_handler = sh  # fuer 'v LEVEL' im Pause-Menue
     work_queue = queue.Queue()
     for task in tasks:
         work_queue.put(task)
