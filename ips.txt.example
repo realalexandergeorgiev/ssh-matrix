@@ -1,0 +1,29 @@
+# IP-Liste fuer ssh_matrix.py
+# Kopieren nach ips.txt und anpassen.
+#
+# Format je Zeile (eine Zeile = ein Eintrag):
+#   <IP>                     -> Port 22 (Default)
+#   <IP>:<PORT>              -> abweichender SSH-Port
+#   <IP>/<CIDR>              -> ganzes Subnetz expandieren (Port 22)
+#   <IP>/<CIDR>:<PORT>       -> Subnetz mit abweichendem Port
+#   <IP1>-<IP2>              -> IP-Range (Port 22)
+#   <IP1>-<IP2>:<PORT>       -> IP-Range mit abweichendem Port
+#
+# Optional: Label am Zeilenende nach " # " (erscheint in detail.csv / report.xlsx).
+# Kommentare beginnen mit "#" am Zeilenanfang. Leerzeilen werden ignoriert.
+#
+# WICHTIG: Es werden ALLE geordneten Paare (A->B und B->A) getestet.
+# Bei 220 IPs sind das ca. 48.000 Tests - siehe README zur Laufzeit.
+
+# Einzelne IPs
+10.0.0.5
+10.0.0.12:2222            # abweichender Port
+10.0.0.13                 # webserver1
+
+# Subnetze
+10.0.1.0/24
+10.0.2.0/24:2200
+
+# Ranges
+10.10.0.10-10.10.0.20
+10.10.0.30-10.10.0.40:2222
