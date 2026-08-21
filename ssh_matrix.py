@@ -57,14 +57,14 @@ KNOWN_STATUSES = {
 RETRY_ALL_EXCLUDE = {"auth_ok", "skipped"}
 SUCCESS_STATUSES = {"auth_ok"}
 
-VERSION = "v2.0.2"
+VERSION = "v2.0.3"
 AUTHOR = "Alex & DeepSeek"
 
 # RAM-Warnschwelle in MB (per env ueberschreibbar, z.B. fuer Tests).
 RAM_WARN_MB = int(os.environ.get("SSH_MATRIX_RAM_WARN_MB", "1024"))
 
 
-def estimate_ram_mb(n: int, with_resume: bool) -> float:
+def estimate_ram_mb(n: int) -> float:
     """Grobe Schaetzung des Spitzen-RAM in MB. Streaming-Architektur:
     kein O(n^2)-Speicher mehr (Bitmaps statt pairs-Liste/done-Set)."""
     mb = 60.0                 # Python + paramiko + App-Basis
@@ -174,6 +174,20 @@ STATUS_COLORS = {
     "tool_error": C_RED,
     "unclear": C_GRAY,
     "skipped": C_GRAY,
+}
+
+# Textual-Markup-Tags je Status (fuer den TUI-Zwischenbericht).
+STATUS_MARKUP = {
+    "auth_ok": "green",
+    "auth_fail": "yellow",
+    "port_open": "blue",
+    "port_closed": "dim",
+    "net_unreachable": "red",
+    "source_unreachable": "red",
+    "no_tool": "yellow",
+    "tool_error": "red",
+    "unclear": "dim",
+    "skipped": "dim",
 }
 
 
@@ -584,12 +598,15 @@ class SourceTester:
                 break
             time.sleep(0.5)
         if not any(line.startswith("HAVE:") for line in text.splitlines()):
-            # Fehlgeschlagene Erkennung NICHT cachen -> naechster Test
-            # versucht es erneut. WARNING ins run.log fuer Diagnose.
+            # Nach 3 direkten Fehlversuchen CACHEN (nicht pro Target erneut
+            # proben - das waere ~90s pro Target). Transiente Ausfaelle sind
+            # durch die 3 Versuche abgedeckt. WARNING ins run.log.
+            self.tools = {}
             logging.getLogger("ssh_matrix").warning(
-                "Tool-Erkennung auf %s:%s ohne Ergebnis (Probe-Ausgabe: %.160r)",
+                "Tool-Erkennung auf %s:%s nach 3 Versuchen ohne Ergebnis "
+                "(Probe-Ausgabe: %.160r)",
                 self.src["ip"], self.src["port"], text[:160])
-            return {}
+            return self.tools
         lines = text.splitlines()
         self.tools = {name: (f"HAVE:{name}" in lines) for name in TOOL_PROBE.split()}
         m = re.search(r"OpenSSH[_-](\d+)\.(\d+)", text)
@@ -1003,13 +1020,6 @@ class RunStats:
             }
 
 
-def chunk_list(lst: list, n: int) -> list:
-    if n <= 1:
-        return [lst]
-    k = max(1, -(-len(lst) // n))
-    return [lst[i:i + k] for i in range(0, len(lst), k)]
-
-
 def id_chunks(n: int, k: int):
     """(start, end)-Bereiche ueber die Host-Indizes 0..n-1 in k Chunks."""
     if k <= 1:
@@ -1049,7 +1059,7 @@ def skip_first(it: iter, k: int) -> iter:
 
 
 def worker(src_id, id_range, ctx, config, user, password, writer, lock,
-           progress, direction_working, stop_event, log) -> tuple:
+           stats, direction_working, stop_event, log) -> tuple:
     src = ctx.hosts[src_id]
 
     def targets_iter():
@@ -1073,9 +1083,9 @@ def worker(src_id, id_range, ctx, config, user, password, writer, lock,
             writer.flush()
             # Batch-Update: ein Sprung pro Status statt 219x +1
             if n_skipped:
-                progress.update(n_skipped, instant=True, status="skipped")
+                stats.update(n_skipped, instant=True, status="skipped")
             if n_srcerr:
-                progress.update(n_srcerr, instant=True, status="source_unreachable")
+                stats.update(n_srcerr, instant=True, status="source_unreachable")
         log.warning("Quelle %s:%s nicht erreichbar: %s", src["ip"], src["port"], err)
         return src_id, n_skipped + n_srcerr, 0
 
@@ -1097,7 +1107,7 @@ def worker(src_id, id_range, ctx, config, user, password, writer, lock,
                 if len(direction_working[direction]) >= config.subnet_quota:
                     writer.writerow(make_row(src, tgt, "quota_skip", "skipped", 0, ""))
                     writer.flush()
-                    progress.update(1, instant=True, status="skipped")
+                    stats.update(1, instant=True, status="skipped")
                     processed += 1
                     continue
 
@@ -1106,12 +1116,15 @@ def worker(src_id, id_range, ctx, config, user, password, writer, lock,
             writer.writerow(make_row(src, tgt, res["method"], res["status"],
                                      res["latency_ms"], res["error"]))
             writer.flush()
-            progress.update(1, status=res["status"])
+            stats.update(1, status=res["status"])
             if config.subnet_quota > 0 and res["status"] in config.quota_statuses:
                 dw = direction_working[(src["net"], tgt["net"])]
                 if len(dw) < config.subnet_quota:  # nur Laenge zaehlt -> kappen
                     dw.add(src["ip"])
-        if res["status"] == "tool_error" and not res["error"]:
+        if (res["status"] == "tool_error"
+                and (not res["error"]
+                     or "open_session" in res["error"]
+                     or "exec_command timeout" in res["error"])):
             consec += 1
         else:
             consec = 0
@@ -1127,7 +1140,7 @@ def worker(src_id, id_range, ctx, config, user, password, writer, lock,
                         n_rest += 1
                     writer.flush()
                     if n_rest:
-                        progress.update(n_rest, instant=True, status="source_unreachable")
+                        stats.update(n_rest, instant=True, status="source_unreachable")
                 log.warning("Reconnect fehlgeschlagen, %d Ziele als "
                             "source_unreachable markiert", n_rest)
                 break
@@ -1141,7 +1154,7 @@ def worker(src_id, id_range, ctx, config, user, password, writer, lock,
 # ---------------------------------------------------------------- Worker-Pool
 
 def consumer(work_queue, config, stop_event, user, password, writer, lock,
-             progress, direction_working, log, ctx):
+             stats, direction_working, log, ctx):
     """Ein Consumer-Thread: zieht Tasks aus der Queue und fuehrt sie aus.
     Beendet sich bei Stop, bei leerer Queue oder wenn ueberzaehlig
     (Worker-Anpassung im Pause-Menue)."""
@@ -1159,7 +1172,7 @@ def consumer(work_queue, config, stop_event, user, password, writer, lock,
             return
         try:
             worker(src_id, id_range, ctx, config, user, password, writer,
-                   lock, progress, direction_working, stop_event, log)
+                   lock, stats, direction_working, stop_event, log)
         except Exception as exc:
             log.exception("Worker-Fehler fuer Quelle %s", ctx.hosts[src_id]["ip"])
         finally:
@@ -1169,7 +1182,7 @@ def consumer(work_queue, config, stop_event, user, password, writer, lock,
 
 
 def spawn_consumers(n, work_queue, config, stop_event, user, password, writer,
-                    lock, progress, direction_working, log, ctx):
+                    lock, stats, direction_working, log, ctx):
     """n neue Consumer-Threads starten."""
     for _ in range(n):
         with config.lock:
@@ -1177,13 +1190,13 @@ def spawn_consumers(n, work_queue, config, stop_event, user, password, writer,
         threading.Thread(
             target=consumer,
             args=(work_queue, config, stop_event, user, password, writer,
-                  lock, progress, direction_working, log, ctx),
+                  lock, stats, direction_working, log, ctx),
             daemon=True,
         ).start()
 
 
 def set_workers(config, n, work_queue, stop_event, user, password, writer,
-                lock, progress, direction_working, log, ctx) -> None:
+                lock, stats, direction_working, log, ctx) -> None:
     """Worker-Anzahl zur Laufzeit aendern. Mehr -> spawnen, weniger ->
     ueberschuessige Consumer beenden sich nach ihrem aktuellen Task."""
     if n < 0:
@@ -1193,7 +1206,7 @@ def set_workers(config, n, work_queue, stop_event, user, password, writer,
         current = config.active_workers
     if n > current:
         spawn_consumers(n - current, work_queue, config, stop_event, user,
-                        password, writer, lock, progress, direction_working,
+                        password, writer, lock, stats, direction_working,
                         log, ctx)
 
 
@@ -1205,9 +1218,19 @@ def fmt_num(n: int) -> str:
 
 
 def interim_report_lines(progress: RunStats, direction_working, config) -> list:
-    """Sprechender, farbiger Zwischenbericht (Zeilenliste) fuer die TUI.
+    """Sprechender Zwischenbericht (Zeilenliste) fuer die TUI.
     Kumulativ: Vorlauf-Daten aus detail.csv (progress.detail_counts)
-    plus Zaehler des aktuellen Laufs."""
+    plus Zaehler des aktuellen Laufs. Farben als Textual-Markup
+    ([b], [cyan], ...) - die TUI rendert das im RichLog.
+
+    WICHTIG: Hier bewusst KEIN ANSI (paint/colored), sonst zeigt das
+    ReportModal Escape-Sequenzen statt Farben."""
+
+    def mk(tag: str, text: str, bold: bool = False) -> str:
+        if bold:
+            return f"[b][{tag}]{text}[/{tag}][/b]"
+        return f"[{tag}]{text}[/{tag}]"
+
     counts = progress.counts
     detail_counts = getattr(progress, "detail_counts", None) or Counter()
     done = progress.initial + progress.real + progress.instant
@@ -1218,8 +1241,8 @@ def interim_report_lines(progress: RunStats, direction_working, config) -> list:
     eta = fmt_duration(remaining / rate) if rate > 0 and remaining > 0 else "unbekannt"
 
     out = [""]
-    out.append(paint(C_CYAN, "=========== ZWISCHENBERICHT ===========", bold=True))
-    out.append(f"Fortschritt: {paint(C_BOLD, fmt_num(done))} von "
+    out.append(mk("cyan", "=========== ZWISCHENBERICHT ===========", bold=True))
+    out.append(f"Fortschritt: [b]{fmt_num(done)}[/b] von "
                f"{fmt_num(progress.total)} Paaren ({pct:.2f}%)")
     if progress.initial:
         out.append(f"  davon {fmt_num(progress.initial)} bereits getestet (Vorlauf), "
@@ -1231,25 +1254,27 @@ def interim_report_lines(progress: RunStats, direction_working, config) -> list:
 
     merged = Counter(detail_counts)
     merged.update(counts)
-    out.append(paint(C_CYAN, "Status gesamt (Vorlauf + Lauf):"))
+    out.append(mk("cyan", "Status gesamt (Vorlauf + Lauf):"))
     any_count = False
     for st in STATUS_ORDER:
         n = merged.get(st, 0)
         if n:
             any_count = True
-            out.append(f"  {colored(st, f'{fmt_num(n):>12}')}  {STATUS_DESCRIPTIONS[st]}")
+            color = STATUS_MARKUP.get(st, "")
+            line = f"  {fmt_num(n):>12}  {STATUS_DESCRIPTIONS[st]}"
+            out.append(mk(color, line) if color else line)
     if not any_count:
         out.append("  (noch keine Testergebnisse vorhanden)")
     this_run = {st: n for st, n in counts.items() if n}
     if this_run:
         kurz = ", ".join(f"{STATUS_SHORT[st]}:{fmt_num(n)}" for st, n in this_run.items())
-        out.append(f"  {paint(C_GRAY, f'(davon in diesem Lauf: {kurz})')}")
+        out.append(f"  [dim](davon in diesem Lauf: {kurz})[/dim]")
     out.append("")
 
     if config.subnet_quota > 0:
         confirmed = sum(1 for v in direction_working.values()
                         if len(v) >= config.subnet_quota)
-        out.append(f"{paint(C_CYAN, 'Subnetz-Erreichbarkeit:')} {confirmed} von "
+        out.append(f"[cyan]Subnetz-Erreichbarkeit:[/] {confirmed} von "
                    f"{len(direction_working)} Richtungen bestaetigt "
                    f"(Quota {config.subnet_quota}, Modus {config.quota_mode})")
         problems = sorted(
@@ -1258,7 +1283,7 @@ def interim_report_lines(progress: RunStats, direction_working, config) -> list:
             key=lambda x: x[2], reverse=True)
         if problems:
             for s_net, t_net, n in problems[:10]:
-                out.append(f"  {paint(C_YELLOW, s_net + ' -> ' + t_net + ':')} "
+                out.append(f"  [yellow]{s_net} -> {t_net}:[/] "
                            f"{n} Quell-Hosts bestaetigt (Quota {config.subnet_quota} "
                            f"noch nicht erreicht)")
             if len(problems) > 10:
@@ -1266,7 +1291,7 @@ def interim_report_lines(progress: RunStats, direction_working, config) -> list:
                            f"mit Luecken")
     else:
         out.append("(Keine Subnetz-Quota aktiv - alle Richtungen werden voll getestet)")
-    out.append(paint(C_CYAN, "=======================================", bold=True))
+    out.append(mk("cyan", "=======================================", bold=True))
     out.append("")
     return out
 
@@ -1436,7 +1461,7 @@ def main():
 
     # RAM-Warnung vor dem Start (Schaetzung, Streaming-Architektur).
     with_resume = bool(args.resume or retry_statuses)
-    est = estimate_ram_mb(n, with_resume)
+    est = estimate_ram_mb(n)
     if est > RAM_WARN_MB:
         log.warning("Geschaetzter RAM-Bedarf ~%d MB fuer %d Endpunkte (%d Paare, "
                     "resume=%s) - Schwelle %d MB ueberschritten.",
@@ -1571,18 +1596,20 @@ def main():
     log.info("Fertig in %ds. Auswertung: python3 ssh_matrix_report.py --detail %s --out %s",
              int(elapsed), detail_path, args.out)
     ok_count = stats.counts.get("auth_ok", 0)
-    fail_count = stats.real + stats.instant - ok_count
+    skip_count = stats.counts.get("skipped", 0)
+    fail_count = stats.real + stats.instant - ok_count - skip_count
     if USE_COLOR and not use_tui:
         print(f"\n{C_GREEN}Fertig{C_RESET} in {int(elapsed)}s. "
               f"{colored('auth_ok', f'{ok_count} OK')}, "
-              f"{colored('auth_fail', f'{fail_count} Fehler')}. "
+              f"{colored('auth_fail', f'{fail_count} Fehler')}, "
+              f"{colored('skipped', f'{skip_count} SKIP')}. "
               f"Ergebnisse: {detail_path}", file=sys.stderr)
         print(f"{C_CYAN}Report erzeugen:{C_RESET}", file=sys.stderr)
         print(f"  python3 ssh_matrix_report.py --detail {detail_path} --out {args.out}",
               file=sys.stderr)
     elif not use_tui:
-        print(f"\nFertig in {int(elapsed)}s. {ok_count} OK, {fail_count} Fehler. "
-              f"Ergebnisse: {detail_path}", file=sys.stderr)
+        print(f"\nFertig in {int(elapsed)}s. {ok_count} OK, {fail_count} Fehler, "
+              f"{skip_count} SKIP. Ergebnisse: {detail_path}", file=sys.stderr)
         print("Report erzeugen:", file=sys.stderr)
         print(f"  python3 ssh_matrix_report.py --detail {detail_path} --out {args.out}",
               file=sys.stderr)

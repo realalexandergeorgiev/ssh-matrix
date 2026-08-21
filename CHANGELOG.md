@@ -5,6 +5,34 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v2.0.3] (2026-08-20) — Review-Fixes
+
+### Behoben
+- **TUI-Zwischenbericht (r) zeigte ANSI-Garbage**: `interim_report_lines`
+  erzeugte ANSI-Escapes (wegen `USE_COLOR` bei TTY), aber das `ReportModal`
+  nutzt RichLog-Markup → verstümmelte Anzeige. Jetzt Textual-Markup
+  (`[b]`, `[cyan]`, `[yellow]`, …). Zudem war die Markup-Hilfsfunktion
+  fehlerhaft (`[b]tag[/b]TEXT[/]`) — korrigiert.
+- **Tool-Erkennung probte bis zu ~90 s pro Ziel erneut**: Bei dauerhaft
+  fehlschlagender Probe (kein `HAVE:`-Marker) wurde `self.tools` nie
+  gesetzt → jeder Target-Aufruf startete erneut 3 Probe-Versuche
+  (≈ 5,5 h pro Quelle bei 219 Zielen). Jetzt wird `{}` nach 3 direkten
+  Versuchen gecacht (WARNING bleibt); Ziele werden schnell `no_tool`.
+- **Reconnect griff nicht bei Channel-Open/exec-Fehlern**: Der
+  `consec`-Zähler zählte nur `tool_error` mit leerem Fehlertext. Jetzt
+  zählen auch `open_session:`- und `exec_command timeout`-Fehler →
+  Reconnect greift, sonst `source_unreachable`-Bulk statt 30 s × 219
+  Ziele pro Quelle.
+- **`v` (Verbosity) in der TUI war wirkungslos**: Setzt jetzt den
+  Log-Level des `TuiLogHandler` → das Log-Pane filtert echt.
+
+### Geändert
+- CLI-Zusammenfassung zeigt `OK / Fehler / SKIP` getrennt (skipped zählt
+  nicht mehr als Fehler).
+- Dead Code entfernt (`chunk_list`), ungenutzte Imports in der TUI,
+  `estimate_ram_mb` ohne ungenutzten Parameter, Worker-/Pool-Parameter
+  `progress` → `stats` benannt, Docstring-Version aktualisiert.
+
 ## [v2.0.2] (2026-08-20) — Channel-Open-Timeout (Worker-Hänger behoben)
 
 ### Behoben
@@ -355,6 +383,7 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   `StrictHostKeyChecking=no`, keine known_hosts-Verschmutzung,
   Temp-Dateien auf Zielen sofort gelöscht
 
+[v2.0.3]: ./README.md
 [v2.0.2]: ./README.md
 [v2.0.1]: ./README.md
 [v2.0.0]: ./README.md

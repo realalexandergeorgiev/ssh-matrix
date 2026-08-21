@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ssh_matrix_tui.py - Textual-TUI fuer den SSH-Matrix-Tester (v2.0.0).
+ssh_matrix_tui.py - Textual-TUI fuer den SSH-Matrix-Tester (v2.0.3).
 
 Panes: Status, Settings, Graphen (btop-Look: pairs/s, real-tests/s,
 aktive Threads) und Log. Stop/Quit nur nach Bestaetigungs-Modal.
@@ -22,8 +22,8 @@ from textual.widgets import (DataTable, Footer, Header, Input, ProgressBar,
                              RichLog, Sparkline, Static)
 
 from ssh_matrix import (QUOTA_MODES, STATUS_ORDER, STATUS_SHORT,
-                        STATUS_COLORS, VERSION, colored, fmt_duration,
-                        fmt_num, interim_report_lines, set_workers)
+                        VERSION, fmt_duration, fmt_num,
+                        interim_report_lines, set_workers)
 
 
 # ---------------------------------------------------------------- Log-Bruecke
@@ -392,7 +392,10 @@ class SSHMatrixApp(App):
             self.runlog.warning("Quota-Modus auf %s gesetzt", parsed)
         elif key == "v":
             self.config.verbose_level = parsed
-            self.runlog.warning("Verbosity auf %s gesetzt", parsed)
+            if self.log_handler is not None:
+                from ssh_matrix import LOG_LEVELS
+                self.log_handler.setLevel(LOG_LEVELS[parsed])
+            self.runlog.warning("Verbosity auf %s gesetzt (Log-Pane)", parsed)
 
     def action_set_workers(self):
         self._settings_modal("w", "Worker-Anzahl", str(self.config.target_workers),
