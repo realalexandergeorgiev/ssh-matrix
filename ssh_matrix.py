@@ -57,7 +57,7 @@ KNOWN_STATUSES = {
 RETRY_ALL_EXCLUDE = {"auth_ok", "skipped"}
 SUCCESS_STATUSES = {"auth_ok"}
 
-VERSION = "v2.0.0"
+VERSION = "v2.0.1"
 AUTHOR = "Alex & DeepSeek"
 
 # RAM-Warnschwelle in MB (per env ueberschreibbar, z.B. fuer Tests).
@@ -880,6 +880,9 @@ class RunStats:
         self.pps = deque(maxlen=history_len)
         self.real_s = deque(maxlen=history_len)
         self.threads_h = deque(maxlen=history_len)
+        # EMA-geglaettete Serien (sichtbare Kurven statt Spike+Null)
+        self.pps_ema = deque(maxlen=history_len)
+        self.real_ema = deque(maxlen=history_len)
 
     def update(self, n: int = 1, instant: bool = False, status: str = None) -> None:
         with self.lock:
@@ -894,20 +897,40 @@ class RunStats:
         with self.lock:
             return self.initial + self.real + self.instant
 
+    def remaining(self) -> int:
+        with self.lock:
+            return self.total - self.initial - self.real - self.instant
+
     def sample(self, active_threads: int) -> None:
         """Einen Messpunkt fuer die Graphen aufnehmen (TUI-Refresher und
-        CLI-Einzeiler rufen das periodisch auf)."""
+        CLI-Einzeiler rufen das periodisch auf). Neben den rohen Raten
+        werden EMA-geglaettete Serien (pps_ema/real_ema) gefuehrt, damit
+        die Sparklines sichtbare Kurven zeigen statt Spike+Null."""
         with self.lock:
             now = time.monotonic()
             dt = now - self._last_sample
             if dt <= 0:
                 return
             done_now = self.initial + self.real + self.instant
-            self.pps.append((done_now - self._last_done) / dt)
-            self.real_s.append((self.real - self._last_real) / dt)
+            pps = (done_now - self._last_done) / dt
+            real_ps = (self.real - self._last_real) / dt
+            self.pps.append(pps)
+            self.real_s.append(real_ps)
             self.threads_h.append(active_threads)
+            self.pps_ema.append(self._ema(self.pps_ema, pps))
+            self.real_ema.append(self._ema(self.real_ema, real_ps))
             self._last_sample, self._last_done, self._last_real = \
                 now, done_now, self.real
+
+    # EMA-Glaettung fuer die Graphen-Serien.
+    _EMA_ALPHA = 0.3
+
+    @staticmethod
+    def _ema(series: deque, value: float) -> float:
+        if not series:
+            return value
+        a = RunStats._EMA_ALPHA
+        return a * value + (1 - a) * series[-1]
 
     def _status_line_locked(self) -> str:
         """Status-Einzeiler bauen (Lock muss bereits gehalten sein)."""
@@ -919,6 +942,8 @@ class RunStats:
         eta = fmt_duration(remaining / rate) if rate > 0 and remaining > 0 else "unbekannt"
         parts = [f"{fmt_num(done)}/{fmt_num(self.total)} ({pct:.2f}%)",
                  f"{rate:.1f}/s", f"ETA {eta}"]
+        if remaining > 0:
+            parts.append(f"noch {fmt_num(remaining)}")
         for st in STATUS_ORDER:
             n = self.counts.get(st, 0)
             if n:
@@ -955,9 +980,12 @@ class RunStats:
                 "detail_counts": dict(self.detail_counts),
                 "pps": list(self.pps),
                 "real_s": list(self.real_s),
+                "pps_ema": list(self.pps_ema),
+                "real_ema": list(self.real_ema),
                 "threads_h": list(self.threads_h),
                 "start": self.start,
                 "done": self.initial + self.real + self.instant,
+                "remaining": self.total - self.initial - self.real - self.instant,
             }
 
 

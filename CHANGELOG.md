@@ -5,6 +5,26 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v2.0.1] (2026-08-20) — TUI-Fixes: Settings-Enter, Graphen, Resume-Anzeige
+
+### Behoben
+- **Settings ändern in der TUI ging nicht**: Das fokussierte `Input`
+  verschluckte die Enter-Taste (Widget-Bindings haben Vorrang vor
+  Screen-Bindings) — `action_ok` wurde nie aufgerufen. Enter wird jetzt
+  über das `Input.Submitted`-Event abgefangen und übernimmt den Wert.
+- **Graphen (pairs/s, real-tests/s, aktive Threads) waren statisch**:
+  `RunStats.sample()` erzeugte Spike-Plus-Null-Serien (z. B. ein
+  135-Mio.-Ausreißer + lauter 0), die Sparkline skalierte auf den Spike
+  → fast alles eine flache Null-Linie. Jetzt **EMA-geglättete Serien**
+  (`pps_ema`/`real_ema`, α=0,3) für sichtbare Kurven, zusätzlich die
+  aktuellen Werte als Zahlen neben den Graphen.
+- **Resume-Anzeige irreführend**: Der Fortschrittsbalken zeigte Gesamt
+  inkl. Vorlauf (z. B. 12,6 Mio./12,6 Mio. = 99,79 %), obwohl noch
+  Tausende Paare offen waren. Jetzt zeigt der Balken **diesen Lauf**
+  (0 → verbleibend) mit großer Zeile „noch X Paare" und Sekundärzeile
+  „Gesamt · Vorlauf · offen". Der CLI-Einzeiler nennt die offenen Paare
+  ebenfalls („noch X").
+
 ## [v2.0.0] (2026-08-20) — TUI (Textual) & vereinfachter CLI
 
 ### Hinzugefügt
@@ -320,6 +340,7 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   `StrictHostKeyChecking=no`, keine known_hosts-Verschmutzung,
   Temp-Dateien auf Zielen sofort gelöscht
 
+[v2.0.1]: ./README.md
 [v2.0.0]: ./README.md
 [v1.2.6]: ./README.md
 [v1.2.5]: ./README.md

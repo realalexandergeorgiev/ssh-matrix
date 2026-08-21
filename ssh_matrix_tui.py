@@ -73,10 +73,14 @@ class ConfirmModal(ModalScreen[bool]):
 
 
 class SettingsModal(ModalScreen):
-    """Eingabe-Modal fuer eine Settings-Aenderung."""
+    """Eingabe-Modal fuer eine Settings-Aenderung.
+
+    WICHTIG: Das fokussierte Input verschluckt die Enter-Taste (Widget-
+    Bindings haben Vorrang vor Screen-Bindings) - daher wird Enter ueber
+    das Input.Submitted-Event abgefangen, nicht ueber ein Screen-Binding.
+    """
 
     BINDINGS = [
-        Binding("enter", "ok", "OK"),
         Binding("escape", "cancel", "Abbrechen"),
     ]
 
@@ -89,10 +93,11 @@ class SettingsModal(ModalScreen):
 
     def compose(self) -> ComposeResult:
         yield Static(f"[b]{self._label}[/b] (aktuell: {self._current})")
-        yield Input(placeholder=f"Neuer Wert fuer {self._key} ...")
+        yield Input(placeholder=f"Neuer Wert fuer {self._key} ...",
+                    id="settings-input")
 
-    def action_ok(self):
-        value = self.query_one(Input).value.strip()
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        value = event.input.value.strip()
         if value:
             self._on_submit(self._key, value)
         self.dismiss(None)
@@ -179,18 +184,18 @@ class SSHMatrixApp(App):
         with Horizontal():
             with Vertical(id="status-box"):
                 yield Static("", id="status-eta")
-                yield ProgressBar(total=max(1, self.stats.total),
-                                  show_percentage=False, id="status-bar")
+                yield ProgressBar(total=max(1, self.stats.remaining()),
+                                  show_percentage=True, id="status-bar")
                 yield DataTable(id="status-table")
             with Vertical(id="settings-box"):
                 yield Static("", id="settings")
         with Horizontal():
             with Vertical(id="graphs-box"):
-                yield Static("[b]pairs/s[/b]")
+                yield Static("[b]pairs/s[/b]", id="lbl-pps")
                 yield Sparkline([0], summary_function=max, id="spark-pps")
-                yield Static("[b]real-tests/s[/b]")
+                yield Static("[b]real-tests/s[/b]", id="lbl-real")
                 yield Sparkline([0], summary_function=max, id="spark-real")
-                yield Static("[b]aktive Threads[/b]")
+                yield Static("[b]aktive Threads[/b]", id="lbl-threads")
                 yield Sparkline([0], summary_function=max, id="spark-threads")
             with Vertical(id="log-box"):
                 yield RichLog(highlight=True, markup=True, wrap=False,
@@ -214,18 +219,30 @@ class SSHMatrixApp(App):
         self.stats.sample(active)
         snap = self.stats.snapshot()
 
-        # Status
+        # Status: dieser Lauf (verbleibend) + Gesamt (inkl. Vorlauf)
         done = snap["done"]
-        pct = 100.0 * done / snap["total"] if snap["total"] else 0.0
+        remaining = snap["remaining"]
+        this_run = snap["real"] + snap["instant"]
+        pct_total = 100.0 * done / snap["total"] if snap["total"] else 0.0
+        pct_run = 100.0 * this_run / remaining if remaining > 0 else 0.0
         elapsed = time.monotonic() - snap["start"]
         rate = snap["real"] / elapsed if elapsed > 0 and snap["real"] else 0.0
-        remaining = snap["total"] - done
         eta = fmt_duration(remaining / rate) if rate > 0 and remaining > 0 else "unbekannt"
-        self.query_one("#status-eta", Static).update(
-            f"[b]{fmt_num(done)}[/b] / {fmt_num(snap['total'])} Paaren "
-            f"({pct:.2f}%)  ·  {rate:.1f} Tests/s  ·  ETA {eta}")
-        self.query_one("#status-bar", ProgressBar).progress = done
-        self.query_one("#status-bar", ProgressBar).total = max(1, snap["total"])
+        if remaining:
+            self.query_one("#status-eta", Static).update(
+                f"[b]noch {fmt_num(remaining)} Paare[/b]  ·  "
+                f"dieser Lauf {fmt_num(this_run)}/{fmt_num(remaining)} "
+                f"({pct_run:.2f}%)  ·  {rate:.1f} Tests/s  ·  ETA {eta}\n"
+                f"[dim]Gesamt {fmt_num(snap['total'])} "
+                f"({fmt_num(done)} getestet, davon {fmt_num(snap['initial'])} "
+                f"Vorlauf, {pct_total:.2f}%)[/dim]")
+        else:
+            self.query_one("#status-eta", Static).update(
+                f"[b]Fertig - alle Paare getestet[/b]  ·  {fmt_num(done)} "
+                f"von {fmt_num(snap['total'])}")
+        bar = self.query_one("#status-bar", ProgressBar)
+        bar.total = max(1, remaining)
+        bar.progress = min(bar.total, this_run)
 
         # Status-Tabelle (kumulativ: Vorlauf + Lauf)
         table = self.query_one("#status-table", DataTable)
@@ -252,10 +269,18 @@ class SSHMatrixApp(App):
             f"Verbosity  {self.config.verbose_level}  [dim](v)[/dim]\n"
             f"\n[dim]s=Stop  r=Report  p=Pause[/dim]")
 
-        # Graphen
-        self.query_one("#spark-pps", Sparkline).data = snap["pps"] or [0]
-        self.query_one("#spark-real", Sparkline).data = snap["real_s"] or [0]
+        # Graphen (EMA-geglaettete Kurven + aktuelle Werte als Zahlen)
+        pps_ema = snap["pps_ema"] or [0]
+        real_ema = snap["real_ema"] or [0]
+        self.query_one("#spark-pps", Sparkline).data = pps_ema
+        self.query_one("#spark-real", Sparkline).data = real_ema
         self.query_one("#spark-threads", Sparkline).data = snap["threads_h"] or [0]
+        self.query_one("#lbl-pps", Static).update(
+            f"[b]pairs/s[/b]  {pps_ema[-1]:.1f}")
+        self.query_one("#lbl-real", Static).update(
+            f"[b]real-tests/s[/b]  {real_ema[-1]:.1f}")
+        self.query_one("#lbl-threads", Static).update(
+            f"[b]aktive Threads[/b]  {active}")
 
         # Log-Pane leeren
         if self.log_handler is not None:
