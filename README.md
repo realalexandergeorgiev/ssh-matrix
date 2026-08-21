@@ -251,6 +251,12 @@ A auf A's Port; von A aus wird B auf B's Port getestet (`ssh -p <B_port>`).
 | `--out DIR` | `ssh_matrix_out` | Ausgabe-Verzeichnis |
 | `--matrix-name NAME` | `matrix.csv` | Name der Matrix-CSV |
 | `--xlsx-name NAME` | `report.xlsx` | Name der Excel-Datei |
+| `--detail-max N` | `50000` | Detail-Sheet auf max N Zeilen kappen (volle Daten bleiben in `detail.csv`; Excel-Limit 1.048.576) |
+| `--matrix-limit N` | `2000` | Host-Matrix-Sheet ab N Endpunkten überspringen (Hinweiszeile; n² Zellen wären sonst unbrauchbar groß). `matrix.csv`/`netz_matrix.csv` bleiben immer voll |
+
+Der Report verarbeitet `detail.csv` **streaming** (kein vollständiges Laden
+in den RAM): bei 12,6 Mio. Zeilen reicht der Speicherverbrauch statt
+mehrerer GB für das komplett erzeugte `report.xlsx` aus.
 
 ---
 

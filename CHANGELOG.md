@@ -5,6 +5,33 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v2.0.4] (2026-08-21) — Report skaliert (streaming) & Ctrl+C deterministisch
+
+### Behoben
+- **Report brach bei großen detail.csv zusammen**: `load_detail` lud alle
+  Zeilen in den RAM (`list(DictReader)`, mehrere GB bei 12,6 Mio. Zeilen),
+  `status_map` baute ein 12,6-Mio.-Dict (~2,5 GB), und das Detail-Sheet
+  sprengte Excels 1.048.576-Zeilen-Limit. Jetzt **streaming in zwei
+  Pässen**:
+  - Pass 1: Endpunkte, Netz-Aggregation, Status-Verteilung, Statistiken
+  - Pass 2: `codes`-Bytearray (1 Byte/Paar statt Riesen-Dict;
+    12,6 Mio. Paare ≈ 12,6 MB statt ~2,5 GB) + Detail-Sheet
+  - **Detail-Sheet gekappt** (`--detail-max`, Default 50.000; volle Daten
+    bleiben in detail.csv, Hinweiszeile im Sheet)
+  - **Host-Matrix-Sheet** wird ab `--matrix-limit` Endpunkten (Default
+    2000) übersprungen (Hinweiszeile) — n² gestylte Zellen wären sonst
+    stundenlang + ~1 GB xlsx. `matrix.csv`/`netz_matrix.csv` bleiben voll.
+  - Gemessen (500k Zeilen, 12k Endpunkte): Peak **~570 MB** statt vorher
+    mehrere GB bis Absturz.
+- **1× Ctrl+C im CLI konnte je nach Timing hart abbrechen**: Der äußere
+  `except KeyboardInterrupt` („2x hart") umschloss den ganzen
+  Polling-Loop inkl. `sample()`/Status-Print. Entfernt — 1× Ctrl+C stoppt
+  jetzt immer sauber; 2× Ctrl+C (während des Shutdown) bleibt hart
+  (Exit 130, über den Shutdown-Handler).
+- Report-`VERSION` war veraltet (v1.2.1) — jetzt konsistent v2.0.4.
+- `build_xlsx`-Parameter `detail_path` entfernt (ungenutzt), Dead Code
+  (`load_detail`, `build_subnet_agg`) bereinigt.
+
 ## [v2.0.3] (2026-08-20) — Review-Fixes
 
 ### Behoben
@@ -383,6 +410,7 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   `StrictHostKeyChecking=no`, keine known_hosts-Verschmutzung,
   Temp-Dateien auf Zielen sofort gelöscht
 
+[v2.0.4]: ./README.md
 [v2.0.3]: ./README.md
 [v2.0.2]: ./README.md
 [v2.0.1]: ./README.md

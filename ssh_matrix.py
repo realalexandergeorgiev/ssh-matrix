@@ -57,7 +57,7 @@ KNOWN_STATUSES = {
 RETRY_ALL_EXCLUDE = {"auth_ok", "skipped"}
 SUCCESS_STATUSES = {"auth_ok"}
 
-VERSION = "v2.0.3"
+VERSION = "v2.0.4"
 AUTHOR = "Alex & DeepSeek"
 
 # RAM-Warnschwelle in MB (per env ueberschreibbar, z.B. fuer Tests).
@@ -1550,25 +1550,21 @@ def main():
                 args.user, password, writer, lock, log, ctx, tui_log_handler)
         log.warning("TUI beendet - sauberer Stop, Rest bleibt fuer --resume erhalten")
     else:
-        try:
-            while not stop_event.is_set():
-                with config.lock:
-                    active = config.active_workers
-                if work_queue.empty() and active == 0:
-                    break  # alles getestet, alle Consumer fertig
-                stats.maybe_print_status(args.status_interval)
-                stats.sample(active)
-                try:
-                    time.sleep(0.5)
-                except KeyboardInterrupt:
-                    # 1x Ctrl+C = sauberer Stop (resume-faehig)
-                    log.warning("Stop angefordert (Ctrl+C) - Worker beenden "
-                                "aktuellen Test, Rest bleibt fuer --resume erhalten")
-                    break
-        except KeyboardInterrupt:
-            # 2x Ctrl+C ausserhalb -> hart abbrechen.
-            log.warning("Abbruch durch Benutzer (2x Ctrl+C) - Ergebnisse bleiben erhalten")
-            os._exit(130)
+        while not stop_event.is_set():
+            with config.lock:
+                active = config.active_workers
+            if work_queue.empty() and active == 0:
+                break  # alles getestet, alle Consumer fertig
+            stats.maybe_print_status(args.status_interval)
+            stats.sample(active)
+            try:
+                time.sleep(0.5)
+            except KeyboardInterrupt:
+                # 1x Ctrl+C = immer sauberer Stop (resume-faehig).
+                # 2x Ctrl+C (waehrend des Shutdown) = hart, siehe unten.
+                log.warning("Stop angefordert (Ctrl+C) - Worker beenden "
+                            "aktuellen Test, Rest bleibt fuer --resume erhalten")
+                break
 
     # Sauber herunterfahren: warten bis alle Consumer ihren aktuellen Task
     # beendet haben (begrenzt, damit nichts haengt).

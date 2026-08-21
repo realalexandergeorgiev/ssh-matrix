@@ -19,7 +19,7 @@ import csv
 import ipaddress
 import os
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 try:
     from openpyxl import Workbook
@@ -34,7 +34,7 @@ except ImportError:
 
 DEFAULT_PORT = 22
 
-VERSION = "v1.2.1"
+VERSION = "v2.0.4"
 AUTHOR = "Alex & DeepSeek"
 
 
@@ -75,90 +75,153 @@ STYLE = {
 }
 
 
-def load_detail(path: str) -> list:
-    with open(path, newline="", encoding="utf-8") as fh:
-        return list(csv.DictReader(fh))
-
-
 def ep_label(ip: str, port: str) -> str:
     return ip if int(port) == DEFAULT_PORT else f"{ip}:{port}"
 
 
-def build_endpoints(rows: list) -> list:
+def fmt_num(n: int) -> str:
+    """Zahl mit Punkt-Tausendertrennung."""
+    return f"{n:,}".replace(",", ".")
+
+
+# Streaming-Architektur: detail.csv wird NIE komplett in den RAM geladen.
+# Status je Paar landet in einem codes-Bytearray (1 Byte/Paar) statt in
+# einem Riesen-Dict (~2,5 GB bei 12,6 Mio. Paaren).
+
+STATUS_TO_CODE = {st: i + 1 for i, st in enumerate(CODE)}
+CODE_TO_SHORT = {v: CODE[k] for k, v in STATUS_TO_CODE.items()}
+
+
+def _register_ep(eps: dict, r: dict, side: str) -> dict:
+    key = (r[f"{side}_ip"], int(r[f"{side}_port"]))
+    e = eps.get(key)
+    if e is None:
+        e = {
+            "ip": r[f"{side}_ip"],
+            "port": int(r[f"{side}_port"]),
+            "label": r.get(f"{side}_label", "") or "",
+            "n24": r.get(f"{side}_24", r.get("src_24", "")),
+            "n16": r.get(f"{side}_16", r.get("src_16", "")),
+            "net": r.get(f"{'src' if side == 'source' else 'tgt'}_net",
+                         r.get(f"{side}_24", "")),
+        }
+        eps[key] = e
+    elif not e["label"] and r.get(f"{side}_label"):
+        e["label"] = r[f"{side}_label"]
+    return e
+
+
+def analyze_detail(path: str) -> dict:
+    """Pass 1 (streaming): Endpunkte, Netz-Aggregation, Status-Verteilung,
+    Endpunkt-Statistiken. Return-Dict mit allen Daten."""
     eps = {}
-    for r in rows:
-        for side in ("source", "target"):
-            key = (r[f"{side}_ip"], int(r[f"{side}_port"]))
-            if key not in eps:
-                eps[key] = {
-                    "ip": r[f"{side}_ip"],
-                    "port": int(r[f"{side}_port"]),
-                    "label": r.get(f"{side}_label", "") or "",
-                    "n24": r.get(f"{side}_24", r.get("src_24", "")),
-                    "n16": r.get(f"{side}_16", r.get("src_16", "")),
-                    "net": r.get(f"{'src' if side == 'source' else 'tgt'}_net",
-                                 r.get(f"{side}_24", "")),
-                }
-            if not eps[key]["label"] and r.get(f"{side}_label"):
-                eps[key]["label"] = r[f"{side}_label"]
-    return sorted(eps.values(),
-                  key=lambda e: (ipaddress.IPv4Address(e["ip"]).packed, e["port"]))
+    agg = defaultdict(lambda: {"ok": 0, "port_only": 0, "failed": 0,
+                               "tested": 0, "skipped": 0})
+    nets = set()
+    counts = Counter()
+    src_ok = set()          # (ip, port) mit auth_ok als Quelle
+    tgt_reach = set()       # (ip, port) erreichbar als Ziel (auth_ok/port_open)
+    tgt_auth = set()        # (ip, port) mit auth_ok als Ziel
+    skipped_by_n24 = Counter()
+    rows_total = 0
+    with open(path, newline="", encoding="utf-8") as fh:
+        for r in csv.DictReader(fh):
+            rows_total += 1
+            s = _register_ep(eps, r, "source")
+            t = _register_ep(eps, r, "target")
+            st = r["status"]
+            counts[st] += 1
+            s_key = (s["ip"], s["port"])
+            t_key = (t["ip"], t["port"])
+            if st == "auth_ok":
+                src_ok.add(s_key)
+                tgt_auth.add(t_key)
+            if st in ("auth_ok", "port_open"):
+                tgt_reach.add(t_key)
+            if st == "skipped":
+                skipped_by_n24[r.get("src_24", "") or r.get("src_net", "")] += 1
+            s_net = r.get("src_net") or r.get("src_24", "")
+            t_net = r.get("tgt_net") or r.get("tgt_24", "")
+            if s_net and t_net:
+                nets.add(s_net)
+                nets.add(t_net)
+                a = agg[(s_net, t_net)]
+                if st == "skipped":
+                    a["skipped"] += 1
+                else:
+                    a["tested"] += 1
+                    if st == "auth_ok":
+                        a["ok"] += 1
+                    elif st == "port_open":
+                        a["port_only"] += 1
+                    else:
+                        a["failed"] += 1
+    eps_sorted = sorted(eps.values(),
+                        key=lambda e: (ipaddress.IPv4Address(e["ip"]).packed,
+                                       e["port"]))
+    id_of = {(e["ip"], e["port"]): i for i, e in enumerate(eps_sorted)}
+    sorted_nets = sorted(nets,
+                         key=lambda n: ipaddress.IPv4Network(n, strict=False)
+                         .network_address.packed)
+    return {
+        "eps": eps_sorted,
+        "id_of": id_of,
+        "agg": dict(agg),
+        "nets": sorted_nets,
+        "counts": counts,
+        "src_ok": src_ok,
+        "tgt_reach": tgt_reach,
+        "tgt_auth": tgt_auth,
+        "skipped_by_n24": skipped_by_n24,
+        "rows_total": rows_total,
+    }
 
 
-def status_map(rows: list) -> dict:
-    sm = {}
-    for r in rows:
-        sm[(r["source_ip"], int(r["source_port"]),
-            r["target_ip"], int(r["target_port"]))] = r["status"]
-    return sm
-
-
-def write_matrix_csv(matrix_path: str, eps: list, sm: dict) -> None:
-    labels = [ep_label(e["ip"], str(e["port"])) for e in eps]
-    with open(matrix_path, "w", newline="", encoding="utf-8") as fh:
-        w = csv.writer(fh)
-        w.writerow(["quelle\\ziel"] + labels)
-        for s in eps:
-            row = [ep_label(s["ip"], str(s["port"]))]
-            for t in eps:
-                if s["ip"] == t["ip"] and s["port"] == t["port"]:
-                    row.append("")
-                    continue
-                st = sm.get((s["ip"], s["port"], t["ip"], t["port"]))
-                row.append(CODE.get(st, "?") if st else "")
-            w.writerow(row)
+def pass2_codes(path: str, id_of: dict, n: int, detail_max: int) -> tuple:
+    """Pass 2 (streaming): fuellt das codes-Bytearray (alle Zeilen) und
+    sammelt die ersten detail_max Zeilen fuer das Detail-Sheet.
+    Return: (codes, detail_header, detail_rows, detail_truncated)."""
+    codes = bytearray(n * n)
+    detail_rows = []
+    detail_header = None
+    truncated = 0
+    with open(path, newline="", encoding="utf-8") as fh:
+        rd = csv.DictReader(fh)
+        detail_header = rd.fieldnames
+        for r in rd:
+            try:
+                s = id_of.get((r["source_ip"], int(r["source_port"])))
+                t = id_of.get((r["target_ip"], int(r["target_port"])))
+            except (KeyError, ValueError):
+                continue
+            if s is not None and t is not None and s != t:
+                codes[s * n + t] = STATUS_TO_CODE.get(r["status"], 0)
+            if len(detail_rows) < detail_max:
+                detail_rows.append(r)
+            else:
+                truncated += 1
+    return codes, detail_header, detail_rows, truncated
 
 
 def fill(hex_color: str) -> PatternFill:
     return PatternFill(start_color=hex_color, end_color=hex_color, fill_type="solid")
 
 
-def build_subnet_agg(rows: list) -> tuple:
-    """Aggregiert detail.csv nach (src_net, tgt_net).
-    Return: (agg dict, sortierte Netz-Liste)."""
-    agg = defaultdict(lambda: {"ok": 0, "port_only": 0, "failed": 0, "tested": 0, "skipped": 0})
-    nets = set()
-    for r in rows:
-        s_net = r.get("src_net") or r.get("src_24", "")
-        t_net = r.get("tgt_net") or r.get("tgt_24", "")
-        if not s_net or not t_net:
-            continue
-        nets.add(s_net)
-        nets.add(t_net)
-        a = agg[(s_net, t_net)]
-        st = r["status"]
-        if st == "skipped":
-            a["skipped"] += 1
-        else:
-            a["tested"] += 1
-            if st == "auth_ok":
-                a["ok"] += 1
-            elif st == "port_open":
-                a["port_only"] += 1
-            else:
-                a["failed"] += 1
-    sorted_nets = sorted(nets, key=lambda n: ipaddress.IPv4Network(n, strict=False).network_address.packed)
-    return agg, sorted_nets
+def write_matrix_csv(matrix_path: str, eps: list, codes: bytearray) -> None:
+    n = len(eps)
+    labels = [ep_label(e["ip"], str(e["port"])) for e in eps]
+    with open(matrix_path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["quelle\\ziel"] + labels)
+        for i, s in enumerate(eps):
+            row = [ep_label(s["ip"], str(s["port"]))]
+            base = i * n
+            for j in range(n):
+                if i == j:
+                    row.append("")
+                    continue
+                row.append(CODE_TO_SHORT.get(codes[base + j], ""))
+            w.writerow(row)
 
 
 def subnet_cell(agg_entry: dict) -> tuple:
@@ -194,8 +257,11 @@ def write_netz_matrix_csv(path: str, agg: dict, nets: list) -> None:
             w.writerow(row)
 
 
-def build_xlsx(xlsx_path: str, detail_path: str, rows: list, eps: list,
-               sm: dict, labels: list, agg: dict = None, nets: list = None) -> None:
+def build_xlsx(xlsx_path: str, detail_header, detail_rows: list,
+               detail_truncated: int, eps: list, codes: bytearray,
+               labels: list, agg: dict = None, nets: list = None,
+               src_ok=None, tgt_reach=None, tgt_auth=None,
+               skipped_by_n24=None, matrix_limit: int = 0) -> None:
     wb = Workbook()
     ws_search = wb.active
     ws_search.title = "Suche"
@@ -272,28 +338,39 @@ def build_xlsx(xlsx_path: str, detail_path: str, rows: list, eps: list,
     ws_search.column_dimensions["C"].width = 40
 
     # ---- Matrix ---------------------------------------------------------
-    ws_matrix["A1"] = "Quelle \\ Ziel"
-    ws_matrix["A1"].font = Font(bold=True)
-    for j, lab in enumerate(labels, start=2):
-        c = ws_matrix.cell(row=1, column=j, value=lab)
-        c.font = Font(bold=True, size=8)
-        c.alignment = Alignment(textRotation=90, horizontal="center")
-        ws_matrix.column_dimensions[get_column_letter(j)].width = 7
-    for i, s in enumerate(eps, start=2):
-        ws_matrix.cell(row=i, column=1, value=ep_label(s["ip"], str(s["port"]))).font = Font(bold=True)
-        for j, t in enumerate(eps, start=2):
-            if s["ip"] == t["ip"] and s["port"] == t["port"]:
-                continue
-            st = sm.get((s["ip"], s["port"], t["ip"], t["port"]))
-            code = CODE.get(st, "?") if st else "?"
-            cell = ws_matrix.cell(row=i, column=j, value=code)
-            cell.alignment = Alignment(horizontal="center")
-            if code in STYLE:
-                bg, fg = STYLE[code]
-                cell.fill = fill(bg)
-                cell.font = Font(color=fg, size=8)
-    ws_matrix.column_dimensions["A"].width = 15
-    ws_matrix.freeze_panes = "B2"
+    n = len(eps)
+    if matrix_limit and n > matrix_limit:
+        # Host-Matrix bei sehr vielen Endpunkten ueberspringen (Excel-
+        # Overkill: n^2 gestylte Zellen). matrix.csv + Netz-Matrix bleiben.
+        ws_matrix["A1"] = (f"Host-Matrix uebersprungen: {n} Endpunkte > "
+                           f"Limit {matrix_limit} - siehe matrix.csv "
+                           f"und Sheet 'Netz-Matrix'.")
+        ws_matrix["A1"].font = Font(bold=True, color="FF0000")
+        ws_matrix.column_dimensions["A"].width = 60
+    else:
+        ws_matrix["A1"] = "Quelle \\ Ziel"
+        ws_matrix["A1"].font = Font(bold=True)
+        for j, lab in enumerate(labels, start=2):
+            c = ws_matrix.cell(row=1, column=j, value=lab)
+            c.font = Font(bold=True, size=8)
+            c.alignment = Alignment(textRotation=90, horizontal="center")
+            ws_matrix.column_dimensions[get_column_letter(j)].width = 7
+        for i, s in enumerate(eps):
+            ws_matrix.cell(row=i + 2, column=1,
+                           value=ep_label(s["ip"], str(s["port"]))).font = Font(bold=True)
+            base = i * n
+            for j in range(n):
+                if i == j:
+                    continue
+                code = CODE_TO_SHORT.get(codes[base + j], "?")
+                cell = ws_matrix.cell(row=i + 2, column=j + 2, value=code)
+                cell.alignment = Alignment(horizontal="center")
+                if code in STYLE:
+                    bg, fg = STYLE[code]
+                    cell.fill = fill(bg)
+                    cell.font = Font(color=fg, size=8)
+        ws_matrix.column_dimensions["A"].width = 15
+        ws_matrix.freeze_panes = "B2"
 
     # ---- Netz-Matrix ---------------------------------------------------
     if ws_netz is not None and nets:
@@ -317,20 +394,26 @@ def build_xlsx(xlsx_path: str, detail_path: str, rows: list, eps: list,
         ws_netz.column_dimensions["A"].width = 18
         ws_netz.freeze_panes = "B2"
 
-    # ---- Detail ---------------------------------------------------------
-    if rows:
-        headers = list(rows[0].keys())
-        ws_detail.append(headers)
+    # ---- Detail (gekappt auf detail_max; volle Daten in detail.csv) ----
+    if detail_header:
+        ws_detail.append(detail_header)
         for cell in ws_detail[1]:
             cell.font = Font(bold=True)
-        for r in rows:
-            ws_detail.append([r.get(h, "") for h in headers])
-        ws_detail.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{len(rows) + 1}"
+        for r in detail_rows:
+            ws_detail.append([r.get(h, "") for h in detail_header])
+        n_rows = len(detail_rows) + 1
+        if detail_truncated:
+            note = [f"... weitere {fmt_num(detail_truncated)} Zeilen in "
+                    "detail.csv (Detail-Sheet gekappt)"]
+            note += [""] * (len(detail_header) - 1)
+            ws_detail.append(note)
+            n_rows += 1
+        ws_detail.auto_filter.ref = f"A1:{get_column_letter(len(detail_header))}{n_rows}"
         ws_detail.freeze_panes = "A2"
 
-        status_col = headers.index("status") + 1
+        status_col = detail_header.index("status") + 1
         col_letter = get_column_letter(status_col)
-        rng = f"{col_letter}2:{col_letter}{len(rows) + 1}"
+        rng = f"{col_letter}2:{col_letter}{len(detail_rows) + 1}"
         for st, code in CODE.items():
             if code not in STYLE:
                 continue
@@ -344,24 +427,14 @@ def build_xlsx(xlsx_path: str, detail_path: str, rows: list, eps: list,
                   "target_port": 9, "target_label": 18, "tgt_24": 13, "tgt_16": 13,
                   "tgt_net": 16, "direction": 9, "method": 10, "status": 13,
                   "latency_ms": 11, "error": 60}
-        for idx, h in enumerate(headers, start=1):
+        for idx, h in enumerate(detail_header, start=1):
             ws_detail.column_dimensions[get_column_letter(idx)].width = widths.get(h, 14)
 
     # ---- Subnetze -------------------------------------------------------
-    src_ok = set()
-    tgt_reach = set()
-    tgt_auth = set()
-    skipped_pairs = 0
-    for r in rows:
-        s = (r["source_ip"], int(r["source_port"]))
-        t = (r["target_ip"], int(r["target_port"]))
-        if r["status"] == "auth_ok":
-            src_ok.add(s)
-            tgt_auth.add(t)
-        if r["status"] in ("auth_ok", "port_open"):
-            tgt_reach.add(t)
-        if r["status"] == "skipped":
-            skipped_pairs += 1
+    src_ok = src_ok or set()
+    tgt_reach = tgt_reach or set()
+    tgt_auth = tgt_auth or set()
+    skipped_by_n24 = skipped_by_n24 or Counter()
 
     ep_by_n24 = defaultdict(list)
     for e in eps:
@@ -375,15 +448,13 @@ def build_xlsx(xlsx_path: str, detail_path: str, rows: list, eps: list,
     for n24 in sorted(ep_by_n24):
         members = ep_by_n24[n24]
         keys = [(m["ip"], m["port"]) for m in members]
-        n_skip = sum(1 for r in rows
-                     if r.get("src_24") == n24 and r["status"] == "skipped")
         row = [
             n24,
             len(members),
             sum(1 for k in keys if k in src_ok),
             sum(1 for k in keys if k in tgt_reach),
             sum(1 for k in keys if k in tgt_auth),
-            n_skip,
+            skipped_by_n24.get(n24, 0),
         ]
         ws_subnets.append(row)
     ws_subnets.auto_filter.ref = f"A1:F{len(ep_by_n24) + 1}"
@@ -414,6 +485,12 @@ def main():
                     help="Ausgabe-Verzeichnis (Default: ssh_matrix_out)")
     ap.add_argument("--matrix-name", default="matrix.csv")
     ap.add_argument("--xlsx-name", default="report.xlsx")
+    ap.add_argument("--detail-max", type=int, default=50000,
+                    help="Detail-Sheet auf max N Zeilen kappen "
+                         "(Default: 50000, Excel-Limit 1048576; 0 = alle)")
+    ap.add_argument("--matrix-limit", type=int, default=2000,
+                    help="Host-Matrix-Sheet ab N Endpunkten ueberspringen "
+                         "(Default: 2000; 0 = nie)")
     args = ap.parse_args()
 
     print_banner()
@@ -422,31 +499,42 @@ def main():
         print(f"FEHLER: {args.detail} existiert nicht", file=sys.stderr)
         sys.exit(1)
 
-    rows = load_detail(args.detail)
-    if not rows:
+    detail_max = args.detail_max if args.detail_max > 0 else 1048576
+
+    # Streaming: detail.csv wird NIE komplett in den RAM geladen.
+    analysis = analyze_detail(args.detail)
+    if analysis["rows_total"] == 0:
         print(f"FEHLER: {args.detail} enthaelt keine Daten", file=sys.stderr)
         sys.exit(1)
 
-    eps = build_endpoints(rows)
-    sm = status_map(rows)
+    eps = analysis["eps"]
     labels = [ep_label(e["ip"], str(e["port"])) for e in eps]
-    agg, nets = build_subnet_agg(rows)
+    n = len(eps)
+
+    codes, detail_header, detail_rows, detail_truncated = pass2_codes(
+        args.detail, analysis["id_of"], n, detail_max)
 
     os.makedirs(args.out, exist_ok=True)
     matrix_path = os.path.join(args.out, args.matrix_name)
     netz_matrix_path = os.path.join(args.out, "netz_matrix.csv")
     xlsx_path = os.path.join(args.out, args.xlsx_name)
 
-    write_matrix_csv(matrix_path, eps, sm)
-    write_netz_matrix_csv(netz_matrix_path, agg, nets)
-    build_xlsx(xlsx_path, args.detail, rows, eps, sm, labels, agg, nets)
+    write_matrix_csv(matrix_path, eps, codes)
+    write_netz_matrix_csv(netz_matrix_path, analysis["agg"], analysis["nets"])
+    build_xlsx(xlsx_path, detail_header, detail_rows, detail_truncated,
+               eps, codes, labels, analysis["agg"], analysis["nets"],
+               analysis["src_ok"], analysis["tgt_reach"], analysis["tgt_auth"],
+               analysis["skipped_by_n24"], args.matrix_limit)
 
     print(f"Matrix-CSV    : {matrix_path}")
     print(f"Netz-Matrix-CSV: {netz_matrix_path}")
     print(f"Excel-Report  : {xlsx_path}")
-    print(f"  Endpunkte : {len(eps)}")
-    print(f"  Netze     : {len(nets)}")
-    print(f"  Zeilen    : {len(rows)}")
+    print(f"  Endpunkte : {n}")
+    print(f"  Netze     : {len(analysis['nets'])}")
+    print(f"  Zeilen    : {analysis['rows_total']}")
+    if detail_truncated:
+        print(f"  Hinweis   : Detail-Sheet auf {len(detail_rows)} Zeilen "
+              f"gekappt ({fmt_num(detail_truncated)} weitere in detail.csv)")
 
 
 if __name__ == "__main__":
