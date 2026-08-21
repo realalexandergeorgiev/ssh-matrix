@@ -5,6 +5,28 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v2.0.5] (2026-08-21) — Pfad-Vorschläge in der Excel-Suche
+
+### Hinzugefügt
+- **Pfadfindung in der Suche (VON IP → NACH IP)**: Fehlt eine direkte
+  Verbindung, werden **Mehrfach-Hop-Pfade** vorgeschlagen
+  (z. B. A → C → B). Priorität:
+  1. kürzester Pfad nur über **`auth_ok`**-Kanten → „verifiziert (auth_ok)"
+  2. sonst kürzester Pfad über `auth_ok`+`auth_fail`+`port_open` →
+     „nur erreichbar"
+  Nicht-traversierbare Status (`net_unreachable`, `port_closed`, `skipped`,
+  …) sind keine Kanten — ein solches Direktergebnis blockiert den
+  Pfad-Vorschlag nicht.
+- **Neue Sheets** `Pfade` (IP-Pfade) und `Netz-Pfade` (Subnetz-Fallback,
+  deckt auch Cap-Einschränkungen ab) + `pfade.csv`/`netz_pfade.csv`.
+- **Suche-Sheet erweitert**: Zeile „Pfad-Vorschlag" mit
+  `VLOOKUP`-Formel (IP-Pfad → sonst Netz-Pfad über das Quelle-Sheet →
+  sonst „kein Pfad"), farbige Kennzeichnung (grün = verifiziert,
+  gelb = nur erreichbar, grau = kein Pfad).
+- **Flags**: `--paths-hops N` (Default 6), `--paths-max N`
+  (Default 300.000, 0 = aus). Frontier-Cap (100k Knoten/Quelle) gegen
+  dichte Graphen mit Warnung.
+
 ## [v2.0.4] (2026-08-21) — Report skaliert (streaming) & Ctrl+C deterministisch
 
 ### Behoben
@@ -410,6 +432,7 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   `StrictHostKeyChecking=no`, keine known_hosts-Verschmutzung,
   Temp-Dateien auf Zielen sofort gelöscht
 
+[v2.0.5]: ./README.md
 [v2.0.4]: ./README.md
 [v2.0.3]: ./README.md
 [v2.0.2]: ./README.md

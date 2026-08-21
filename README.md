@@ -253,10 +253,19 @@ A auf A's Port; von A aus wird B auf B's Port getestet (`ssh -p <B_port>`).
 | `--xlsx-name NAME` | `report.xlsx` | Name der Excel-Datei |
 | `--detail-max N` | `50000` | Detail-Sheet auf max N Zeilen kappen (volle Daten bleiben in `detail.csv`; Excel-Limit 1.048.576) |
 | `--matrix-limit N` | `2000` | Host-Matrix-Sheet ab N Endpunkten überspringen (Hinweiszeile; n² Zellen wären sonst unbrauchbar groß). `matrix.csv`/`netz_matrix.csv` bleiben immer voll |
+| `--paths-hops N` | `6` | Max. Hops für Pfad-Vorschläge (Mehrfach-Hop-Suche in der Excel-Suche) |
+| `--paths-max N` | `300000` | Max. gespeicherte IP-Pfade (0 = Pfadfindung aus) |
 
 Der Report verarbeitet `detail.csv` **streaming** (kein vollständiges Laden
 in den RAM): bei 12,6 Mio. Zeilen reicht der Speicherverbrauch statt
 mehrerer GB für das komplett erzeugte `report.xlsx` aus.
+
+**Pfad-Vorschläge (Excel-Suche):** In der Suche wird bei fehlender direkter
+Verbindung ein Mehrfach-Hop-Pfad angezeigt (z. B. `A -> C -> B`) — bevorzugt
+nur über verifizierte `auth_ok`-Kanten (grün), sonst über erreichbare
+(`auth_fail`/`port_open`, gelb). Die Sheets `Pfade` (IP) und `Netz-Pfade`
+(Subnetz-Fallback) enthalten die Vorschläge; `pfade.csv`/`netz_pfade.csv`
+als Export.
 
 ---
 

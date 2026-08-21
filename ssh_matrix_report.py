@@ -17,9 +17,10 @@ Sheets in report.xlsx:
 import argparse
 import csv
 import ipaddress
+import logging
 import os
 import sys
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 
 try:
     from openpyxl import Workbook
@@ -34,7 +35,7 @@ except ImportError:
 
 DEFAULT_PORT = 22
 
-VERSION = "v2.0.4"
+VERSION = "v2.0.5"
 AUTHOR = "Alex & DeepSeek"
 
 
@@ -203,6 +204,231 @@ def pass2_codes(path: str, id_of: dict, n: int, detail_max: int) -> tuple:
     return codes, detail_header, detail_rows, truncated
 
 
+# ---------------------------------------------------------------- Pfadfindung
+# Gerichtete Kanten: auth_ok (verifiziert, Prioritaet) und
+# auth_fail/port_open ("reachable", sekundaer). Alle anderen Status = keine
+# Kante. BFS mit Hop-Limit + Caps; Subnetz-Pfade als Fallback.
+
+CODE_AUTH = STATUS_TO_CODE["auth_ok"]
+CODE_REACH = {STATUS_TO_CODE[s] for s in ("auth_fail", "port_open")}
+FRONTIER_CAP = 100000  # Besuchte Knoten pro Quelle -> dichte Graphen begrenzen
+
+
+def build_adjacency(codes: bytearray, n: int) -> tuple:
+    auth_adj = [[] for _ in range(n)]
+    reach_adj = [[] for _ in range(n)]
+    for i in range(n):
+        base = i * n
+        ai = auth_adj[i]
+        ri = reach_adj[i]
+        for j in range(n):
+            if i == j:
+                continue
+            c = codes[base + j]
+            if c == CODE_AUTH:
+                ai.append(j)
+                ri.append(j)
+            elif c in CODE_REACH:
+                ri.append(j)
+    return auth_adj, reach_adj
+
+
+def _bfs(adj, start: int, n: int, max_hops: int, frontier_cap: int):
+    """BFS mit Hop-Limit. Return (prev, reason); reason 'frontier' wenn das
+    Frontier-Cap erreicht wurde."""
+    prev = [-1] * n
+    visited = bytearray(n)
+    visited[start] = 1
+    queue = deque([start])
+    visited_count = 1
+    for _depth in range(max_hops):
+        if not queue:
+            break
+        nxt = []
+        for u in queue:
+            for v in adj[u]:
+                if not visited[v]:
+                    visited[v] = 1
+                    prev[v] = u
+                    nxt.append(v)
+                    visited_count += 1
+        queue = nxt
+        if visited_count > frontier_cap:
+            return prev, "frontier"
+    return prev, "ok"
+
+
+def _path_to(prev: list, src: int, tgt: int):
+    if prev[tgt] == -1:
+        return None
+    path = [tgt]
+    cur = tgt
+    while cur != src:
+        cur = prev[cur]
+        if cur == -1:
+            return None
+        path.append(cur)
+    path.reverse()
+    return path
+
+
+def find_ip_paths(codes, eps, n, max_hops, max_paths, log) -> tuple:
+    """BFS pro Quelle: erst auth_ok-Kanten (verifiziert), dann
+    auth_ok+reachable. Nur Paare OHNE direkte Kante. Return (rows, capped)."""
+    rows = []
+    capped = False
+    limited = False
+    if max_paths <= 0:
+        return rows, capped
+    auth_adj, reach_adj = build_adjacency(codes, n)
+    for i in range(n):
+        if len(rows) >= max_paths:
+            limited = True
+            break
+        if not auth_adj[i] and not reach_adj[i]:
+            continue
+        base = i * n
+        # Pass A: nur auth_ok-Kanten
+        prev, reason = _bfs(auth_adj, i, n, max_hops, FRONTIER_CAP)
+        if reason == "frontier":
+            capped = True
+            continue  # zu dicht -> Subnetz-Fallback deckt ab
+        for j in range(n):
+            if len(rows) >= max_paths:
+                limited = True
+                break
+            if i == j:
+                continue
+            c = codes[base + j]
+            # Traversierbare Direkt-Verbindung? Dann braucht es keinen Pfad.
+            if c == CODE_AUTH or c in CODE_REACH:
+                continue
+            if prev[j] != -1:
+                p = _path_to(prev, i, j)
+                rows.append({
+                    "key": f"{ep_label(eps[i]['ip'], str(eps[i]['port']))}|"
+                           f"{ep_label(eps[j]['ip'], str(eps[j]['port']))}",
+                    "von": ep_label(eps[i]["ip"], str(eps[i]["port"])),
+                    "nach": ep_label(eps[j]["ip"], str(eps[j]["port"])),
+                    "pfad": " -> ".join(
+                        ep_label(eps[k]["ip"], str(eps[k]["port"])) for k in p),
+                    "art": "verifiziert (auth_ok)",
+                })
+        if len(rows) >= max_paths:
+            limited = True
+            break
+        # Pass B: auth_ok + reachable (nur Ziele, die Pass A nicht fand)
+        prev2, reason2 = _bfs(reach_adj, i, n, max_hops, FRONTIER_CAP)
+        if reason2 == "frontier":
+            capped = True
+            continue
+        for j in range(n):
+            if len(rows) >= max_paths:
+                limited = True
+                break
+            if i == j:
+                continue
+            c = codes[base + j]
+            if c == CODE_AUTH or c in CODE_REACH:
+                continue
+            if prev[j] != -1 or prev2[j] == -1:
+                continue
+            p = _path_to(prev2, i, j)
+            rows.append({
+                "key": f"{ep_label(eps[i]['ip'], str(eps[i]['port']))}|"
+                       f"{ep_label(eps[j]['ip'], str(eps[j]['port']))}",
+                "von": ep_label(eps[i]["ip"], str(eps[i]["port"])),
+                "nach": ep_label(eps[j]["ip"], str(eps[j]["port"])),
+                "pfad": " -> ".join(
+                    ep_label(eps[k]["ip"], str(eps[k]["port"])) for k in p),
+                "art": "nur erreichbar",
+            })
+    if capped:
+        log.warning("Pfadfindung: Frontier-Cap erreicht (dichte Quellen) - "
+                    "Subnetz-Pfade decken die Reste ab")
+    if limited:
+        log.warning("Pfadfindung: max_paths=%d erreicht, weitere IP-Pfade "
+                    "nicht gespeichert (Subnetz-Pfade decken die Reste ab)",
+                    max_paths)
+    return rows, capped
+
+
+def find_net_paths(codes, eps, n, max_hops, log) -> list:
+    """Netz-Graph: Knoten = Netze, Kante falls >=1 traversierbare IP-Kante.
+    Pfade fuer ALLE Netzpärchen (auch direkt verbundene - die IP-Suche
+    zeigt dann 'Netze direkt verbunden'). Return rows."""
+    net_id = {}
+    nets = []
+    for e in eps:
+        if e["net"] not in net_id:
+            net_id[e["net"]] = len(nets)
+            nets.append(e["net"])
+    m = len(nets)
+    if m == 0:
+        return []
+    auth_net = [set() for _ in range(m)]
+    reach_net = [set() for _ in range(m)]
+    for i in range(n):
+        ni = net_id[eps[i]["net"]]
+        base = i * n
+        for j in range(n):
+            if i == j:
+                continue
+            c = codes[base + j]
+            if not c:
+                continue
+            nj = net_id[eps[j]["net"]]
+            if ni == nj:
+                continue
+            if c == CODE_AUTH:
+                auth_net[ni].add(nj)
+                reach_net[ni].add(nj)
+            elif c in CODE_REACH:
+                reach_net[ni].add(nj)
+    auth_adj = [sorted(s) for s in auth_net]
+    reach_adj = [sorted(s) for s in reach_net]
+    rows = []
+    for ni in range(m):
+        if not auth_adj[ni] and not reach_adj[ni]:
+            continue
+        direct = auth_net[ni] | reach_net[ni]
+        prev, _ = _bfs(auth_adj, ni, m, max_hops, 10 ** 9)
+        for nj in range(m):
+            if ni == nj or nj in direct:
+                continue
+            if prev[nj] != -1:
+                p = _path_to(prev, ni, nj)
+                rows.append({
+                    "key": f"{nets[ni]}|{nets[nj]}",
+                    "von": nets[ni],
+                    "nach": nets[nj],
+                    "pfad": " -> ".join(nets[k] for k in p),
+                    "art": "verifiziert (auth_ok)",
+                })
+        prev2, _ = _bfs(reach_adj, ni, m, max_hops, 10 ** 9)
+        for nj in range(m):
+            if ni == nj or nj in direct:
+                continue
+            if prev[nj] != -1 or prev2[nj] == -1:
+                continue
+            p = _path_to(prev2, ni, nj)
+            rows.append({
+                "key": f"{nets[ni]}|{nets[nj]}",
+                "von": nets[ni],
+                "nach": nets[nj],
+                "pfad": " -> ".join(nets[k] for k in p),
+                "art": "nur erreichbar",
+            })
+    return rows
+
+
+def write_paths_csv(path: str, rows: list) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as fh:
+        w = csv.DictWriter(fh, fieldnames=["key", "von", "nach", "pfad", "art"])
+        w.writeheader()
+        w.writerows(rows)
+
+
 def fill(hex_color: str) -> PatternFill:
     return PatternFill(start_color=hex_color, end_color=hex_color, fill_type="solid")
 
@@ -261,7 +487,8 @@ def build_xlsx(xlsx_path: str, detail_header, detail_rows: list,
                detail_truncated: int, eps: list, codes: bytearray,
                labels: list, agg: dict = None, nets: list = None,
                src_ok=None, tgt_reach=None, tgt_auth=None,
-               skipped_by_n24=None, matrix_limit: int = 0) -> None:
+               skipped_by_n24=None, matrix_limit: int = 0,
+               ip_paths=None, net_paths=None) -> None:
     wb = Workbook()
     ws_search = wb.active
     ws_search.title = "Suche"
@@ -336,6 +563,43 @@ def build_xlsx(xlsx_path: str, detail_header, detail_rows: list,
     ws_search.column_dimensions["A"].width = 12
     ws_search.column_dimensions["B"].width = 22
     ws_search.column_dimensions["C"].width = 40
+
+    # ---- Pfad-Vorschlag (Mehrfach-Hop) ----------------------------------
+    # Direkt-Ergebnis (B5) steht bereits; darunter: IP-Pfad, sonst
+    # Netz-Pfad (Netz von VON/NACH via Quelle-Sheet), sonst "kein Pfad".
+    ws_search["A6"] = "Pfad-Vorschlag"
+    ws_search["A6"].font = Font(bold=True)
+    net_von = 'INDEX(Quelle!$F:$F,MATCH($B$3,Quelle!$A:$A,0))'
+    net_nach = 'INDEX(Quelle!$F:$F,MATCH($B$4,Quelle!$A:$A,0))'
+    path_formula = (
+        '=IFERROR(VLOOKUP($B$3&"|"&$B$4,Pfade!$A:$E,4,0),'
+        f'IFERROR(VLOOKUP({net_von}&"|"&{net_nach},'
+        "'Netz-Pfade'!$A:$D,3,0),\"kein Pfad\"))"
+    )
+    kind_formula = (
+        '=IFERROR(VLOOKUP($B$3&"|"&$B$4,Pfade!$A:$E,5,0),'
+        f'IFERROR(VLOOKUP({net_von}&"|"&{net_nach},'
+        "'Netz-Pfade'!$A:$D,4,0),\"\"))"
+    )
+    ws_search["B6"] = path_formula
+    ws_search["B6"].font = Font(bold=True)
+    ws_search["C6"] = kind_formula
+    ws_search["D6"] = "(Pfade: verifiziert = auth_ok, nur erreichbar = auth_fail/port_open)"
+    ws_search["D6"].font = Font(italic=True, size=8, color="808080")
+
+    # Bedingte Formatierung auf B6/C6: gruen=verifiziert, gelb=nur
+    # erreichbar, grau=kein Pfad.
+    from openpyxl.formatting.rule import FormulaRule
+    for rng in ("B6:C6",):
+        ws_search.conditional_formatting.add(
+            rng, FormulaRule(formula=['ISNUMBER(SEARCH("verifiziert",$C6))'],
+                             fill=fill("C6EFCE"), font=Font(color="006100")))
+        ws_search.conditional_formatting.add(
+            rng, FormulaRule(formula=['ISNUMBER(SEARCH("nur erreichbar",$C6))'],
+                             fill=fill("FFEB9C"), font=Font(color="9C6500")))
+        ws_search.conditional_formatting.add(
+            rng, FormulaRule(formula=['$B6="kein Pfad"'],
+                             fill=fill("D9D9D9"), font=Font(color="404040")))
 
     # ---- Matrix ---------------------------------------------------------
     n = len(eps)
@@ -473,6 +737,33 @@ def build_xlsx(xlsx_path: str, detail_header, detail_rows: list,
     for col, w in zip("ABCDEF", (15, 8, 24, 13, 13, 16)):
         ws_quelle.column_dimensions[col].width = w
 
+    # ---- Pfade (IP-Pfade) ----------------------------------------------
+    ws_pfade = wb.create_sheet("Pfade")
+    for col, h in enumerate(("Schluessel", "VON", "NACH", "Pfad", "Art"), start=1):
+        ws_pfade.cell(row=1, column=col, value=h)
+        ws_pfade.cell(row=1, column=col).font = Font(bold=True)
+        ws_pfade.column_dimensions[get_column_letter(col)].width = (
+            34, 18, 18, 60, 24)[col - 1]
+    if ip_paths:
+        for r in ip_paths:
+            ws_pfade.append([r["key"], r["von"], r["nach"], r["pfad"], r["art"]])
+        ws_pfade.auto_filter.ref = f"A1:E{len(ip_paths) + 1}"
+    ws_pfade.freeze_panes = "A2"
+
+    # ---- Netz-Pfade (Subnetz-Fallback) ---------------------------------
+    ws_netz_pfade = wb.create_sheet("Netz-Pfade")
+    for col, h in enumerate(("Schluessel", "VON-Netz", "NACH-Netz", "Pfad", "Art"),
+                            start=1):
+        ws_netz_pfade.cell(row=1, column=col, value=h)
+        ws_netz_pfade.cell(row=1, column=col).font = Font(bold=True)
+        ws_netz_pfade.column_dimensions[get_column_letter(col)].width = (
+            36, 20, 20, 70, 24)[col - 1]
+    if net_paths:
+        for r in net_paths:
+            ws_netz_pfade.append([r["key"], r["von"], r["nach"], r["pfad"], r["art"]])
+        ws_netz_pfade.auto_filter.ref = f"A1:E{len(net_paths) + 1}"
+    ws_netz_pfade.freeze_panes = "A2"
+
     wb.save(xlsx_path)
 
 
@@ -491,6 +782,10 @@ def main():
     ap.add_argument("--matrix-limit", type=int, default=2000,
                     help="Host-Matrix-Sheet ab N Endpunkten ueberspringen "
                          "(Default: 2000; 0 = nie)")
+    ap.add_argument("--paths-hops", type=int, default=6,
+                    help="Max. Hops fuer Pfad-Vorschlaege (Default: 6)")
+    ap.add_argument("--paths-max", type=int, default=300000,
+                    help="Max. gespeicherte IP-Pfade (Default: 300000; 0 = aus)")
     args = ap.parse_args()
 
     print_banner()
@@ -517,14 +812,29 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     matrix_path = os.path.join(args.out, args.matrix_name)
     netz_matrix_path = os.path.join(args.out, "netz_matrix.csv")
+    pfade_path = os.path.join(args.out, "pfade.csv")
+    netz_pfade_path = os.path.join(args.out, "netz_pfade.csv")
     xlsx_path = os.path.join(args.out, args.xlsx_name)
+
+    # Pfadfindung: IP-Pfade (verifiziert zuerst, sonst erreichbar) +
+    # Subnetz-Fallback. Nur bei Bedarf (paths_max > 0).
+    ip_paths = []
+    net_paths = []
+    if args.paths_max > 0 and args.paths_hops > 0:
+        ip_paths, capped = find_ip_paths(codes, eps, n, args.paths_hops,
+                                         args.paths_max, logging.getLogger("ssh_matrix_report"))
+        net_paths = find_net_paths(codes, eps, n, args.paths_hops,
+                                   logging.getLogger("ssh_matrix_report"))
+        write_paths_csv(pfade_path, ip_paths)
+        write_paths_csv(netz_pfade_path, net_paths)
 
     write_matrix_csv(matrix_path, eps, codes)
     write_netz_matrix_csv(netz_matrix_path, analysis["agg"], analysis["nets"])
     build_xlsx(xlsx_path, detail_header, detail_rows, detail_truncated,
                eps, codes, labels, analysis["agg"], analysis["nets"],
                analysis["src_ok"], analysis["tgt_reach"], analysis["tgt_auth"],
-               analysis["skipped_by_n24"], args.matrix_limit)
+               analysis["skipped_by_n24"], args.matrix_limit,
+               ip_paths, net_paths)
 
     print(f"Matrix-CSV    : {matrix_path}")
     print(f"Netz-Matrix-CSV: {netz_matrix_path}")
@@ -532,6 +842,12 @@ def main():
     print(f"  Endpunkte : {n}")
     print(f"  Netze     : {len(analysis['nets'])}")
     print(f"  Zeilen    : {analysis['rows_total']}")
+    if args.paths_max > 0 and args.paths_hops > 0:
+        print(f"  IP-Pfade  : {len(ip_paths)}")
+        print(f"  Netz-Pfade: {len(net_paths)}")
+        if not ip_paths and not net_paths:
+            print("  Hinweis   : keine Mehrfach-Hop-Pfade gefunden "
+                  "(alle Paare direkt oder unerreichbar)")
     if detail_truncated:
         print(f"  Hinweis   : Detail-Sheet auf {len(detail_rows)} Zeilen "
               f"gekappt ({fmt_num(detail_truncated)} weitere in detail.csv)")
