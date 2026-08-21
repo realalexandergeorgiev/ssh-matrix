@@ -35,7 +35,7 @@ except ImportError:
 
 DEFAULT_PORT = 22
 
-VERSION = "v2.0.5"
+VERSION = "v2.0.6"
 AUTHOR = "Alex & DeepSeek"
 
 
@@ -392,6 +392,18 @@ def find_net_paths(codes, eps, n, max_hops, log) -> list:
         if not auth_adj[ni] and not reach_adj[ni]:
             continue
         direct = auth_net[ni] | reach_net[ni]
+        # Direkt verbundene Netzpärchen: die IP-Suche zeigt dann
+        # 'Netze direkt verbunden' statt 'kein Pfad'.
+        for nj in direct:
+            art = ("verifiziert (auth_ok)" if nj in auth_net[ni]
+                   else "nur erreichbar")
+            rows.append({
+                "key": f"{nets[ni]}|{nets[nj]}",
+                "von": nets[ni],
+                "nach": nets[nj],
+                "pfad": f"{nets[ni]} -> {nets[nj]}",
+                "art": f"Netze direkt verbunden ({art})",
+            })
         prev, _ = _bfs(auth_adj, ni, m, max_hops, 10 ** 9)
         for nj in range(m):
             if ni == nj or nj in direct:
@@ -727,14 +739,17 @@ def build_xlsx(xlsx_path: str, detail_header, detail_rows: list,
         ws_subnets.column_dimensions[col].width = w
 
     # ---- Quelle ---------------------------------------------------------
-    ws_quelle.append(["IP", "Port", "Label", "/24", "/16", "Netz"])
+    # Spalte A = Endpunkt-Label (ep_label: IP oder IP:PORT) - die
+    # Suche-Formel matcht B3/B4 (Dropdown-Werte) gegen diese Spalte.
+    ws_quelle.append(["Endpunkt", "Port", "Label", "/24", "/16", "Netz"])
     for cell in ws_quelle[1]:
         cell.font = Font(bold=True)
     for e in eps:
-        ws_quelle.append([e["ip"], e["port"], e["label"], e["n24"], e["n16"], e.get("net", "")])
+        ws_quelle.append([ep_label(e["ip"], str(e["port"])), e["port"],
+                          e["label"], e["n24"], e["n16"], e.get("net", "")])
     ws_quelle.auto_filter.ref = f"A1:F{len(eps) + 1}"
     ws_quelle.freeze_panes = "A2"
-    for col, w in zip("ABCDEF", (15, 8, 24, 13, 13, 16)):
+    for col, w in zip("ABCDEF", (16, 8, 24, 13, 13, 16)):
         ws_quelle.column_dimensions[col].width = w
 
     # ---- Pfade (IP-Pfade) ----------------------------------------------

@@ -5,6 +5,23 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v2.0.6] (2026-08-21) — Pfad-Fixes
+
+### Behoben
+- **Direkt verbundene Netzpärchen fehlten in „Netz-Pfade"**: Die Suche
+  zeigte „kein Pfad", obwohl die Netze direkt verbunden waren (nur das
+  konkrete Host-Paar hatte keine Kante). Jetzt gibt es dafür den Eintrag
+  „Netze direkt verbunden (verifiziert/nur erreichbar)" mit Pfad
+  `netA -> netB`.
+- **Suche-Formel brach bei SSH-Port ≠ 22**: Das Netz wurde per
+  `MATCH` gegen Quelle!A (reine IP) gesucht, das Dropdown liefert aber
+  `ep_label` (`10.0.0.5:2222`). Quelle-Spalte A ist jetzt der
+  Endpunkt-Label (Kopfzeile „Endpunkt") — der `MATCH` trifft immer.
+
+### Hinweis
+- **Priorität**: Ein längerer `auth_ok`-Pfad schlägt einen kürzeren
+  „nur erreichbar"-Pfad (verifiziert zuerst, wie gewünscht).
+
 ## [v2.0.5] (2026-08-21) — Pfad-Vorschläge in der Excel-Suche
 
 ### Hinzugefügt
@@ -432,6 +449,7 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   `StrictHostKeyChecking=no`, keine known_hosts-Verschmutzung,
   Temp-Dateien auf Zielen sofort gelöscht
 
+[v2.0.6]: ./README.md
 [v2.0.5]: ./README.md
 [v2.0.4]: ./README.md
 [v2.0.3]: ./README.md

@@ -262,10 +262,10 @@ mehrerer GB für das komplett erzeugte `report.xlsx` aus.
 
 **Pfad-Vorschläge (Excel-Suche):** In der Suche wird bei fehlender direkter
 Verbindung ein Mehrfach-Hop-Pfad angezeigt (z. B. `A -> C -> B`) — bevorzugt
-nur über verifizierte `auth_ok`-Kanten (grün), sonst über erreichbare
-(`auth_fail`/`port_open`, gelb). Die Sheets `Pfade` (IP) und `Netz-Pfade`
-(Subnetz-Fallback) enthalten die Vorschläge; `pfade.csv`/`netz_pfade.csv`
-als Export.
+nur über verifizierte `auth_ok`-Kanten (grün, auch wenn länger), sonst über
+erreichbare (`auth_fail`/`port_open`, gelb). Die Sheets `Pfade` (IP) und
+`Netz-Pfade` (Subnetz-Fallback, inkl. „Netze direkt verbunden") enthalten
+die Vorschläge; `pfade.csv`/`netz_pfade.csv` als Export.
 
 ---
 
