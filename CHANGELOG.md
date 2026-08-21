@@ -5,6 +5,21 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v2.0.2] (2026-08-20) — Channel-Open-Timeout (Worker-Hänger behoben)
+
+### Behoben
+- **Worker hingen scheinbar endlos („0 Fortschritt trotz aktiver Threads")**:
+  `open_session()` wurde ohne Timeout aufgerufen — paramiko setzt dann den
+  Default von **3600 s (1 h)**. Antwortet der Server nie auf den
+  Channel-Open-Request (MaxSessions erreicht, Firewall, Überlast), hing der
+  Worker bis zu einer Stunde: kein Ergebnis, kein Log-Eintrag, aber als
+  „aktiver Thread" gezählt. `open_session(timeout=30)` begrenzt das jetzt.
+- **TUI-Refresher defensiv**: Ein Widget-Fehler in `_refresh` fror die
+  Anzeige stumm ein. Jetzt wird die Exception ins run.log + Log-Pane
+  geschrieben, die App läuft weiter.
+- **Diagnose**: Log-Warnung, wenn ein Channel-Open länger als 5 s dauert
+  („Channel-Open langsam auf A: Xs").
+
 ## [v2.0.1] (2026-08-20) — TUI-Fixes: Settings-Enter, Graphen, Resume-Anzeige
 
 ### Behoben
@@ -340,6 +355,7 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   `StrictHostKeyChecking=no`, keine known_hosts-Verschmutzung,
   Temp-Dateien auf Zielen sofort gelöscht
 
+[v2.0.2]: ./README.md
 [v2.0.1]: ./README.md
 [v2.0.0]: ./README.md
 [v1.2.6]: ./README.md

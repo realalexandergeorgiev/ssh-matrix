@@ -211,6 +211,19 @@ class SSHMatrixApp(App):
     # -- Refresher ------------------------------------------------------
 
     def _refresh(self):
+        try:
+            self._do_refresh()
+        except Exception:
+            import traceback
+            tb = traceback.format_exc()
+            self.runlog.error("TUI-Refresher-Fehler:\n%s", tb)
+            try:
+                self.query_one("#log", RichLog).write(
+                    f"[red]TUI-Refresher-Fehler: {tb.splitlines()[-1]}[/red]")
+            except Exception:
+                pass
+
+    def _do_refresh(self):
         snap = self.stats.snapshot()
         with self.config.lock:
             active = self.config.active_workers

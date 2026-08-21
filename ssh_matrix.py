@@ -57,7 +57,7 @@ KNOWN_STATUSES = {
 RETRY_ALL_EXCLUDE = {"auth_ok", "skipped"}
 SUCCESS_STATUSES = {"auth_ok"}
 
-VERSION = "v2.0.1"
+VERSION = "v2.0.2"
 AUTHOR = "Alex & DeepSeek"
 
 # RAM-Warnschwelle in MB (per env ueberschreibbar, z.B. fuer Tests).
@@ -379,6 +379,9 @@ def ep_label(host: dict) -> str:
 class SourceTester:
     """Persistente SSH-Verbindung Kali -> Quelle A + A->B-Testlogik."""
 
+    # Timeout fuer Channel-Open (paramiko-Default waere 3600 s = 1 h).
+    OPEN_SESSION_TIMEOUT = 30
+
     def __init__(self, src: dict, user: str, password: str, config: RunConfig):
         self.src = src
         self.user = user
@@ -454,9 +457,20 @@ class SourceTester:
         if self.client is None or self.client.get_transport() is None:
             return "", "connection closed", -1
         try:
-            chan = self.client.get_transport().open_session()
+            # open_session OHNE Timeout blockiert in paramiko bis zu 3600 s
+            # (open_channel-Default), wenn der Server den Channel-Open-Request
+            # nie bestaetigt (MaxSessions, Firewall, Ueberlast). Deshalb
+            # explizit begrenzen - sonst haengt der Worker scheinbar endlos.
+            t0 = time.monotonic()
+            chan = self.client.get_transport().open_session(
+                timeout=self.OPEN_SESSION_TIMEOUT)
+            dt = time.monotonic() - t0
+            if dt > 5:
+                logging.getLogger("ssh_matrix").warning(
+                    "Channel-Open langsam auf %s:%s: %.1fs",
+                    self.src["ip"], self.src["port"], dt)
         except Exception as exc:
-            return "", str(exc), -1
+            return "", f"open_session: {exc}", -1
         chan.settimeout(1)
 
         # exec_command blockiert in paramiko 2.12 UNBEGRENZT
