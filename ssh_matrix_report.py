@@ -35,7 +35,7 @@ except ImportError:
 
 DEFAULT_PORT = 22
 
-VERSION = "v2.1.0"
+VERSION = "v2.1.1"
 AUTHOR = "Alex & DeepSeek"
 
 
@@ -763,6 +763,20 @@ def build_xlsx(xlsx_path: str, detail_header, detail_rows: list,
         for r in ip_paths:
             ws_pfade.append([r["key"], r["von"], r["nach"], r["pfad"], r["art"]])
         ws_pfade.auto_filter.ref = f"A1:E{len(ip_paths) + 1}"
+        # Farbcodierung: Pfad + Art farbig (gruen=verifiziert, gelb=nur erreichbar)
+        for row in range(2, ws_pfade.max_row + 1):
+            art = ws_pfade.cell(row=row, column=5).value or ""
+            al = str(art).lower()
+            if "verifiziert" in al:
+                bg, fg = "C6EFCE", "006100"
+            elif "nur erreichbar" in al:
+                bg, fg = "FFEB9C", "9C6500"
+            else:
+                bg, fg = "E7E6E6", "595959"
+            for col in (4, 5):
+                c = ws_pfade.cell(row=row, column=col)
+                c.fill = fill(bg)
+                c.font = Font(color=fg)
     ws_pfade.freeze_panes = "A2"
 
     # ---- Netz-Pfade (Subnetz-Fallback) ---------------------------------
@@ -777,6 +791,19 @@ def build_xlsx(xlsx_path: str, detail_header, detail_rows: list,
         for r in net_paths:
             ws_netz_pfade.append([r["key"], r["von"], r["nach"], r["pfad"], r["art"]])
         ws_netz_pfade.auto_filter.ref = f"A1:E{len(net_paths) + 1}"
+        for row in range(2, ws_netz_pfade.max_row + 1):
+            art = ws_netz_pfade.cell(row=row, column=5).value or ""
+            al = str(art).lower()
+            if "verifiziert" in al:
+                bg, fg = "C6EFCE", "006100"
+            elif "nur erreichbar" in al:
+                bg, fg = "FFEB9C", "9C6500"
+            else:
+                bg, fg = "E7E6E6", "595959"
+            for col in (4, 5):
+                c = ws_netz_pfade.cell(row=row, column=col)
+                c.fill = fill(bg)
+                c.font = Font(color=fg)
     ws_netz_pfade.freeze_panes = "A2"
 
     wb.save(xlsx_path)

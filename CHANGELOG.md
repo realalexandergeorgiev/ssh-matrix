@@ -5,6 +5,14 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v2.1.1] (2026-08-21) — Pfad-Sheets farbig
+
+### Hinzugefügt
+- **`Pfade`/`Netz-Pfade`-Sheets farbcodiert**: Pfad- und Art-Spalte je
+  Zeile — grün (`verifiziert (auth_ok)`/`Netze direkt verbunden
+  (verifiziert …)`), gelb (`nur erreichbar`), grau (sonst). Konsistent
+  mit Matrix/Netz-Matrix und der bedingten Formatierung im Suche-Sheet.
+
 ## [v2.1.0] (2026-08-21) — Auth-Pause (Block-Erkennung)
 
 ### Hinzugefügt
@@ -472,6 +480,8 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   `StrictHostKeyChecking=no`, keine known_hosts-Verschmutzung,
   Temp-Dateien auf Zielen sofort gelöscht
 
+[v2.1.1]: ./README.md
+[v2.1.0]: ./README.md
 [v2.0.7]: ./README.md
 [v2.0.6]: ./README.md
 [v2.0.5]: ./README.md
