@@ -5,7 +5,17 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
-## [v2.0.7] (2026-08-21) — Auth-Fixes + Auth-Pause
+## [v2.1.0] (2026-08-21) — Auth-Pause (Block-Erkennung)
+
+### Hinzugefügt
+- **Auth-Pause (`--auth-pause`, `--auth-pause-threshold/window/retries`):**
+  Erkennt Auth-Fail-Block (z.B. Fail2Ban) via Schwelle/Fenster und
+  pausiert alle Worker global X Zeit (z.B. `5m`) interruptible, danach
+  Retry. Konfigurierbar und live via TUI `a`, CLI `v`/`q`/`m` bleiben.
+  Löst deinen Block-Fall: nach wenigen `auth_fail` wird pausiert statt
+  hunderte Fehlversuche zu produzieren.
+
+## [v2.0.7] (2026-08-21) — Auth-Fixes
 
 ### Behoben
 - **Auth failed trotz korrektem Passwort (Kali→A)**: Viele Server haben
@@ -17,14 +27,6 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 - **Passwort-BOM/Leerzeichen**: `utf-8-sig` gegen BOM, Warnung bei
   führenden/anhängenden Leerzeichen/Tabs, Leerstring jetzt `FEHLER`
   (vorher als gültiges leeres Passwort an paramiko gereicht).
-
-### Hinzugefügt
-- **Auth-Pause (`--auth-pause`):** Pausiert bei Auth-Fail-Block
-  (Fail2Ban) X Zeit (z.B. `5m`, `300`) und retryt; alle Worker warten
-  interruptible. Konfigurierbar: `--auth-pause-threshold` (3),
-  `--auth-pause-window` (60s), `--auth-pause-retries` (1). Live via
-  TUI `a`. Ohne Pause liefen alle folgenden Logins falsch-positiv
-  `auth_fail`.
 
 ## [v2.0.6] (2026-08-21) — Pfad-Fixes
 
