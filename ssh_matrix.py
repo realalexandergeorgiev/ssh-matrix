@@ -437,9 +437,65 @@ class SourceTester:
                     transport.set_keepalive(10)
                 self.client = client
                 return True, ""
-            except (socket.timeout, paramiko.AuthenticationException,
-                    paramiko.SSHException, OSError) as exc:
+            except paramiko.AuthenticationException as exc:
+                # Diagnose: welche Auth-Methoden erlaubt der Server?
+                allowed = getattr(exc, "allowed_types", None)
+                banner = ""
+                remote_version = ""
+                try:
+                    t = client.get_transport()
+                    if t is not None:
+                        remote_version = t.remote_version or ""
+                        # banner_timeout/auth_timeout liefern oft die Ursache
+                        banner = remote_version
+                except Exception:
+                    pass
+                # Fallback: wenn Server nur keyboard-interactive erlaubt, mit dumb-handler probieren
+                if allowed and "keyboard-interactive" in [a.strip() for a in (allowed or [])]:
+                    try:
+                        t = client.get_transport()
+                        if t is not None and not t.is_authenticated():
+                            t.auth_interactive_dumb(self.user)
+                            # Einige Server erwarten hier das Passwort als Antwort
+                            # paramiko 2.12: auth_interactive_dumb ohne handler nutzt
+                            # internen Handler der [password] zurückgibt, wenn password gesetzt
+                            # Fallback: explizit mit handler
+                            if not t.is_authenticated():
+                                t.auth_interactive(self.user,
+                                    lambda title, instr, prompts: [self.password] * len(prompts))
+                            if t.is_authenticated():
+                                if t is not None:
+                                    t.set_keepalive(10)
+                                self.client = client
+                                logging.getLogger("ssh_matrix").info(
+                                    "Auth ok via keyboard-interactive (Fallback) auf %s:%s "
+                                    "(server erlaubte: %s)",
+                                    self.src["ip"], self.src["port"], allowed)
+                                return True, ""
+                    except Exception as ki_exc:
+                        last = f"{exc} (keyboard-interactive Fallback: {ki_exc} allowed={allowed})"
+                    else:
+                        last = f"{exc} (allowed={allowed} banner={banner!r})"
+                else:
+                    last = f"{exc} (allowed={allowed} banner={banner!r})"
+                logging.getLogger("ssh_matrix").warning(
+                    "Auth fail %s@%s:%s - %s", self.user, self.src["ip"],
+                    self.src["port"], last)
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                time.sleep(1)
+            except (socket.timeout, paramiko.SSHException, OSError) as exc:
                 last = str(exc)
+                # Banner/SSHException mit Remote-Version anreichern
+                try:
+                    t = client.get_transport()
+                    rv = t.remote_version if t else ""
+                    if rv:
+                        last = f"{exc} (banner={rv!r})"
+                except Exception:
+                    pass
                 try:
                     client.close()
                 except Exception:
@@ -656,7 +712,7 @@ class SourceTester:
         host, port = tgt["ip"], tgt["port"]
         ssh_cmd = (
             f"ssh -p {port} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
-            f"-o ConnectTimeout={self.timeout} -o PreferredAuthentications=password "
+            f"-o ConnectTimeout={self.timeout} -o PreferredAuthentications=password,keyboard-interactive "
             f"-o PubkeyAuthentication=no -o NumberOfPasswordPrompts=1 -o LogLevel=ERROR "
             f"{shlex.quote(f'{self.user}@{host}')} {shlex.quote('echo ' + marker)}"
         )
@@ -1366,18 +1422,36 @@ def parse_args():
 
 def resolve_password(args) -> str:
     if args.pass_file:
-        with open(args.pass_file, "r", encoding="utf-8") as fh:
+        with open(args.pass_file, "r", encoding="utf-8-sig") as fh:
             pw = fh.readline().rstrip("\r\n")
-        if not pw:
-            print(f"FEHLER: --pass-file {args.pass_file} ist leer", file=sys.stderr)
-            sys.exit(2)
-        return pw
+            # BOM (\ufeff) wird durch utf-8-sig bereits entfernt
+            if pw != pw.strip() and pw.strip():
+                print(f"WARNUNG: Passwort aus {args.pass_file} hat fuehrende/anhängende "
+                      f"Leerzeichen/Tabs — wird unverändert verwendet "
+                      f"(len={len(pw)} vs stripped={len(pw.strip())})",
+                      file=sys.stderr)
+            # Leere nach strip testen, BOM bereits weg
+            if not pw:
+                print(f"FEHLER: --pass-file {args.pass_file} ist leer", file=sys.stderr)
+                sys.exit(2)
+            if pw.startswith("\ufeff"):
+                pw = pw.lstrip("\ufeff")
+            return pw
     env = args.pass_env or "SSHPASS"
     pw = os.environ.get(env)
     if pw is None:
         print(f"FEHLER: Umgebungsvariable {env} ist nicht gesetzt "
               f"(export {env}='...')", file=sys.stderr)
         sys.exit(2)
+    if pw == "":
+        print(f"FEHLER: Umgebungsvariable {env} ist leer", file=sys.stderr)
+        sys.exit(2)
+    if pw != pw.strip() and pw.strip():
+        print(f"WARNUNG: Passwort aus ${env} hat fuehrende/anhängende Leerzeichen "
+              f"(len={len(pw)} vs stripped={len(pw.strip())})", file=sys.stderr)
+    if pw.startswith("\ufeff"):
+        pw = pw.lstrip("\ufeff")
+        print(f"WARNUNG: Passwort aus ${env} hatte BOM — entfernt", file=sys.stderr)
     return pw
 
 
