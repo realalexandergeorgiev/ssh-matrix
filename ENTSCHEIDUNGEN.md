@@ -327,3 +327,21 @@ Log-Zeilen + periodischer Status-Einzeiler (`--status-interval`); 1× Ctrl+C
 `maybe_print_status` hielt den Lock und rief `status_line()` auf, das ihn
 erneut erwarb (Deadlock). Gelöst über `_status_line_locked()` (Lock muss
 schon gehalten sein).
+
+---
+
+## 18. Pause-and-Retry bei Auth-Fail-Block (v2.0.2)
+
+**Entscheidung:** `--auth-pause` (z.B. `5m`, `300`) pausiert global, wenn
+`auth_fail`-Häufung einen Block signalisiert (Schwelle/Fenster:
+`--auth-pause-threshold`/`--auth-pause-window`), und retryt das
+getroffene Paar. Gilt für Kali→A (connect) und A→B (test_target) gleichermaßen.
+`tqdm`-Warnhinweis + TUI-Log, interruptible Sleep, danach Retry. Live via
+TUI `a`.
+
+**Begründung:** Fail2Ban/Rate-Limit löst nach wenigen `Auth fail` eine
+temporäre Sperre aus — alle folgenden Logins schlagen falsch-positiv fehl.
+Re-Retry ohne Pause verschlimmert den Block; eine globale Pause entlastet
+den Server und vermeidet Fehlklassifikation. Die bestehenden Phasen
+(Keyboard-Interactive-Fallback, `PreferredAuthentications=password,keyboard-interactive`)
+helfen nicht gegen Block — nur Warten hilft.

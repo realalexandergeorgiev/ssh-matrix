@@ -35,7 +35,7 @@ except ImportError:
 
 DEFAULT_PORT = 22
 
-VERSION = "v2.0.6"
+VERSION = "v2.0.7"
 AUTHOR = "Alex & DeepSeek"
 
 

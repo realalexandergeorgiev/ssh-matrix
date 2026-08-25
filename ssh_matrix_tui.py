@@ -154,6 +154,7 @@ class SSHMatrixApp(App):
         Binding("q", "set_quota", "Quota"),
         Binding("m", "set_mode", "Modus"),
         Binding("v", "set_verbose", "Verbosity"),
+        Binding("a", "set_auth_pause", "Auth-Pause"),
         Binding("ctrl+c", "quit", "Quit"),
         Binding("ctrl+q", "quit", "Quit"),
     ]
@@ -273,6 +274,8 @@ class SSHMatrixApp(App):
         # Settings
         with self.config.lock:
             target = self.config.target_workers
+        ap = self.config.auth_pause
+        ap_str = f"{ap // 60}m" if ap % 60 == 0 and ap >= 60 else f"{ap}s" if ap else "aus"
         self.query_one("#settings", Static).update(
             f"[b]Settings[/b]\n"
             f"Worker     {active}/{target}   [dim](w)[/dim]\n"
@@ -280,6 +283,7 @@ class SSHMatrixApp(App):
             f"Quota      {self.config.subnet_quota}  [dim](q)[/dim]\n"
             f"Modus      {self.config.quota_mode}  [dim](m)[/dim]\n"
             f"Verbosity  {self.config.verbose_level}  [dim](v)[/dim]\n"
+            f"Auth-Pause {ap_str}  [dim](a)[/dim]\n"
             f"\n[dim]s=Stop  r=Report  p=Pause[/dim]")
 
         # Graphen (EMA-geglaettete Kurven + aktuelle Werte als Zahlen)
@@ -396,6 +400,9 @@ class SSHMatrixApp(App):
                 from ssh_matrix import LOG_LEVELS
                 self.log_handler.setLevel(LOG_LEVELS[parsed])
             self.runlog.warning("Verbosity auf %s gesetzt (Log-Pane)", parsed)
+        elif key == "a":
+            self.config.auth_pause = parsed
+            self.runlog.warning("Auth-Pause auf %ds gesetzt", parsed)
 
     def action_set_workers(self):
         self._settings_modal("w", "Worker-Anzahl", str(self.config.target_workers),
@@ -433,6 +440,17 @@ class SSHMatrixApp(App):
         if v not in LOG_LEVELS:
             raise ValueError(v)
         return v
+
+    def action_set_auth_pause(self):
+        cur = self.config.auth_pause
+        cur_s = f"{cur // 60}m" if cur % 60 == 0 and cur >= 60 else f"{cur}s" if cur else "0"
+        self._settings_modal("a", "Auth-Pause (z.B. 5m, 300, 0=aus)", cur_s,
+                             lambda v: self._check_auth_pause(v))
+
+    @staticmethod
+    def _check_auth_pause(v: str) -> int:
+        from ssh_matrix import parse_duration
+        return parse_duration(v)
 
 
 # ---------------------------------------------------------------- Einstieg

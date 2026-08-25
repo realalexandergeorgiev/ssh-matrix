@@ -1,6 +1,6 @@
 # SSH-Matrix-Tester
 
-**Version v2.0.0** — entwickelt von **Alex & DeepSeek**.
+**Version v2.0.7** — entwickelt von **Alex & DeepSeek**.
 
 Testet für alle geordneten IP-Paare, ob **Quelle A einen vollen SSH-Login auf
 Ziel B aufbauen kann** – mit denselben Credentials (User/Passwort) auf allen
@@ -242,6 +242,14 @@ A auf A's Port; von A aus wird B auf B's Port getestet (`ssh -p <B_port>`).
 | `--quota-mode MODE` | `auth_ok` | Was zählt als „funktionierender Quell-Host" für `--subnet-quota`: `auth_ok` (nur voller Login) oder `reachable` (netzwerkseitig erreichbar: `auth_ok`, `auth_fail` oder `port_open`) |
 | `--subnet-gap N` | 16 | Lücken-Schwellwert für Subnetz-Clustering (0 = feste /24) |
 | `--limit-pairs N` | 0 (alle) | Nur die ersten N Paare testen (Trockenlauf) |
+| `--auth-pause DURATION` | 0 (aus) | Bei Auth-Fail-Block pausieren (z.B. `5m`, `300s`) + retry |
+| `--auth-pause-threshold N` | 3 | Fails im Fenster bis Pause |
+| `--auth-pause-window DURATION` | `60s` | Fenster für Fails |
+| `--auth-pause-retries N` | 1 | Retries pro Paar nach Pause |
+| `--auth-pause DURATION` | 0 (aus) | Bei Auth-Fail-Block pausieren (z.B. `5m`, `300`) und retry. 0 = aus |
+| `--auth-pause-threshold N` | 3 | Auth-Fails im Fenster bis Pause |
+| `--auth-pause-window DURATION` | `60s` | Fenster für Auth-Fails (z.B. `60`, `2m`) |
+| `--auth-pause-retries N` | 1 | Retries pro Paar nach Pause |
 
 ### `ssh_matrix_report.py`
 

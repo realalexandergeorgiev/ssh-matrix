@@ -5,6 +5,27 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v2.0.7] (2026-08-21) — Auth-Fixes + Auth-Pause
+
+### Behoben
+- **Auth failed trotz korrektem Passwort (Kali→A)**: Viele Server haben
+  `PasswordAuthentication no` und erlauben nur `keyboard-interactive`.
+  `PreferredAuthentications` jetzt `password,keyboard-interactive`
+  (A→B) und `connect()` mit `keyboard-interactive`-Fallback
+  (`auth_interactive_dumb` → `auth_interactive`). Diagnose via
+  `allowed_types` + Banner im `run.log` (`Auth fail ... allowed=...`).
+- **Passwort-BOM/Leerzeichen**: `utf-8-sig` gegen BOM, Warnung bei
+  führenden/anhängenden Leerzeichen/Tabs, Leerstring jetzt `FEHLER`
+  (vorher als gültiges leeres Passwort an paramiko gereicht).
+
+### Hinzugefügt
+- **Auth-Pause (`--auth-pause`):** Pausiert bei Auth-Fail-Block
+  (Fail2Ban) X Zeit (z.B. `5m`, `300`) und retryt; alle Worker warten
+  interruptible. Konfigurierbar: `--auth-pause-threshold` (3),
+  `--auth-pause-window` (60s), `--auth-pause-retries` (1). Live via
+  TUI `a`. Ohne Pause liefen alle folgenden Logins falsch-positiv
+  `auth_fail`.
+
 ## [v2.0.6] (2026-08-21) — Pfad-Fixes
 
 ### Behoben
@@ -449,6 +470,7 @@ Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
   `StrictHostKeyChecking=no`, keine known_hosts-Verschmutzung,
   Temp-Dateien auf Zielen sofort gelöscht
 
+[v2.0.7]: ./README.md
 [v2.0.6]: ./README.md
 [v2.0.5]: ./README.md
 [v2.0.4]: ./README.md

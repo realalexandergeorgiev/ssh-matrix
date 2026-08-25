@@ -40,7 +40,8 @@ CSV und Excel-Report aufbereitet.
 | FR-16 | S | **Netz-Matrix**: Subnetz-Pivot (Zeilen = Quell-Netze, Spalten = Ziel-Netze) als Sheet + `netz_matrix.csv`, Zellen `ok/tested` mit Farbcodierung. |
 | FR-17 | K | **TUI (Textual)** mit Status-, Settings-, Graphen- und Log-Pane; Stop/Quit nur nach Bestätigung. CLI-Modus: farbige Log-Zeilen + periodischer Status-Einzeiler, 1× Ctrl+C = sauberer Stop. |
 | FR-18 | K | `--limit-pairs N` für Trockenläufe (nur die ersten N Paare testen). |
-| FR-19 | K | IP-Abfrage-Werkzeug (`ssh_matrix_query.py` geplant/optional): für eine IP alle Ziele bzw. alle Quellen anzeigen (HTML + CLI). |
+| FR-19 | K | **Auth-Pause**: `--auth-pause` pausiert bei Auth-Fail-Block (`auth_fail`-Häufung) X Zeit (z.B. `5m`) und retryt; alle Worker warten interruptible. Konfigurierbar via `--auth-pause-threshold/window/retries` und live via TUI `a`. |
+| FR-20 | K | IP-Abfrage-Werkzeug (`ssh_matrix_query.py` geplant/optional): für eine IP alle Ziele bzw. alle Quellen anzeigen (HTML + CLI). |
 
 ---
 

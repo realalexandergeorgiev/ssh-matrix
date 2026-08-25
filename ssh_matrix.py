@@ -57,11 +57,31 @@ KNOWN_STATUSES = {
 RETRY_ALL_EXCLUDE = {"auth_ok", "skipped"}
 SUCCESS_STATUSES = {"auth_ok"}
 
-VERSION = "v2.0.6"
+VERSION = "v2.0.7"
 AUTHOR = "Alex & DeepSeek"
 
 # RAM-Warnschwelle in MB (per env ueberschreibbar, z.B. fuer Tests).
 RAM_WARN_MB = int(os.environ.get("SSH_MATRIX_RAM_WARN_MB", "1024"))
+
+
+def parse_duration(s: str) -> int:
+    """Parst Dauer wie '300', '5m', '2h', '30s' -> Sekunden (int)."""
+    s = s.strip().lower()
+    if not s:
+        raise argparse.ArgumentTypeError("leere Dauer")
+    m = re.fullmatch(r"(\d+)([smh]?)", s)
+    if not m:
+        raise argparse.ArgumentTypeError(
+            f"ungueltige Dauer {s!r}, erwartet Zahl + optional s/m/h (z.B. 300, 5m, 2h)")
+    val = int(m.group(1))
+    unit = m.group(2) or "s"
+    if unit == "s":
+        return val
+    if unit == "m":
+        return val * 60
+    if unit == "h":
+        return val * 3600
+    raise argparse.ArgumentTypeError(f"ungueltige Einheit {unit!r}")
 
 
 def estimate_ram_mb(n: int) -> float:
@@ -135,10 +155,69 @@ class RunConfig:
         self.active_workers = 0
         self.verbose_level = args.verbose
         self.stream_handler = None  # stderr-Handler (fuer --verbose zur Laufzeit)
+        # pause-and-retry-when-auth-failed
+        self.auth_pause = getattr(args, "auth_pause", 0)
+        self.auth_pause_threshold = getattr(args, "auth_pause_threshold", 3)
+        self.auth_pause_window = getattr(args, "auth_pause_window", 60)
+        self.auth_pause_retries = getattr(args, "auth_pause_retries", 1)
+        self._auth_fail_times: deque = deque()
+        self._pause_until: float = 0.0
+        self._last_pause: float = 0.0
 
     @property
     def quota_statuses(self) -> set:
         return QUOTA_MODES[self.quota_mode]
+
+    def is_paused(self) -> bool:
+        with self.lock:
+            return time.monotonic() < self._pause_until
+
+    def wait_if_paused(self, stop_event: threading.Event) -> None:
+        while True:
+            with self.lock:
+                until = self._pause_until
+            now = time.monotonic()
+            if until <= now:
+                return
+            remaining = until - now
+            if stop_event.wait(min(remaining, 0.5)):
+                return
+
+    def record_auth_fail(self, stop_event: threading.Event, log) -> bool:
+        """Registriert einen auth_fail. Liefert True wenn globale Pause ausgeloest."""
+        if self.auth_pause <= 0:
+            return False
+        triggered = False
+        with self.lock:
+            now = time.monotonic()
+            while self._auth_fail_times and self._auth_fail_times[0] < now - self.auth_pause_window:
+                self._auth_fail_times.popleft()
+            self._auth_fail_times.append(now)
+            if len(self._auth_fail_times) < self.auth_pause_threshold:
+                if now < self._pause_until:
+                    triggered = False
+                else:
+                    return False
+            else:
+                if now < self._last_pause + self.auth_pause_window + self.auth_pause:
+                    return False
+                self._last_pause = now
+                self._pause_until = now + self.auth_pause
+                triggered = True
+                self._auth_fail_times.clear()
+        if triggered:
+            log.warning("Auth-Fail Block erkannt (%d fails in %ds) - pausiere %ds ...",
+                        self.auth_pause_threshold, self.auth_pause_window, self.auth_pause)
+            end = time.monotonic() + self.auth_pause
+            while time.monotonic() < end:
+                if stop_event.is_set():
+                    break
+                time.sleep(0.5)
+            log.warning("Pause beendet - retried auths")
+            return True
+        else:
+            self.wait_if_paused(stop_event)
+            return False
 
 # ------------------------------------------------------------ ANSI-Farben
 USE_COLOR = sys.stderr.isatty() and not os.environ.get("NO_COLOR")
@@ -1122,8 +1201,29 @@ def worker(src_id, id_range, ctx, config, user, password, writer, lock,
         return iter_targets(ctx, src_id, id_range)
 
     tester = SourceTester(src, user, password, config)
-    ok, err = tester.connect()
+    # Connect mit pause-and-retry-when-auth-failed
+    connect_retries = 0
+    while True:
+        ok, err = tester.connect()
+        if ok:
+            break
+        is_auth = "auth" in err.lower()
+        if is_auth and config.auth_pause > 0 and connect_retries < config.auth_pause_retries:
+            # globaler Block-Pause
+            config.record_auth_fail(stop_event, log)
+            connect_retries += 1
+            if stop_event.is_set():
+                return src_id, 0, 0
+            log.info("Retry connect %s:%s (%d/%d) nach Pause",
+                     src["ip"], src["port"], connect_retries, config.auth_pause_retries)
+            continue
+        elif is_auth and config.auth_pause > 0:
+            config.record_auth_fail(stop_event, log)
+        break
     if not ok:
+        # bei globaler Pause ggf. mitwarten (andere Worker hat Block ausgeloest)
+        if "auth" in err.lower() and config.auth_pause > 0:
+            config.wait_if_paused(stop_event)
         with lock:
             n_skipped = 0
             n_srcerr = 0
@@ -1142,6 +1242,7 @@ def worker(src_id, id_range, ctx, config, user, password, writer, lock,
                 stats.update(n_skipped, instant=True, status="skipped")
             if n_srcerr:
                 stats.update(n_srcerr, instant=True, status="source_unreachable")
+        # status fuer Statistik: source_unreachable vs source_auth_fail unterscheiden?
         log.warning("Quelle %s:%s nicht erreichbar: %s", src["ip"], src["port"], err)
         return src_id, n_skipped + n_srcerr, 0
 
@@ -1152,6 +1253,8 @@ def worker(src_id, id_range, ctx, config, user, password, writer, lock,
     consec = 0
     processed = 0
     for tgt in targets_iter():
+        # globaler Auth-Pause (andere Worker hat Block erkannt) abwarten
+        config.wait_if_paused(stop_event)
         # Stop angefordert? Restliche Ziele ungeschrieben lassen -> Resume.
         if stop_event.is_set():
             break
@@ -1167,7 +1270,24 @@ def worker(src_id, id_range, ctx, config, user, password, writer, lock,
                     processed += 1
                     continue
 
-        res = tester.test_target(tgt)
+        # A->B mit pause-and-retry-when-auth-failed
+        tgt_retries = 0
+        while True:
+            res = tester.test_target(tgt)
+            if res["status"] == "auth_fail" and config.auth_pause > 0:
+                # fuer Block-Erkennung zaehlen + ggf. globale Pause
+                is_trigger = config.record_auth_fail(stop_event, log)
+                if tgt_retries < config.auth_pause_retries:
+                    tgt_retries += 1
+                    log.info("Retry auth %s->%s (%d/%d) nach Pause %ds",
+                             src["ip"], tgt["ip"], tgt_retries,
+                             config.auth_pause_retries, config.auth_pause)
+                    if stop_event.is_set():
+                        break
+                    continue  # gleiches Ziel erneut
+                # kein Retry mehr - finaler auth_fail wird unten geschrieben
+                break
+            break
         with lock:
             writer.writerow(make_row(src, tgt, res["method"], res["status"],
                                      res["latency_ms"], res["error"]))
@@ -1417,6 +1537,15 @@ def parse_args():
     ap.add_argument("--status-interval", type=int, default=30,
                     help="CLI: periodischer Status-Einzeiler alle N Sekunden "
                          "(Default: 30, 0 = aus)")
+    ap.add_argument("--auth-pause", type=parse_duration, default=0,
+                    help="Bei Auth-Fail Block: pausiere DURATION (z.B. 5m, 300s, 2h) "
+                         "und retry. 0=aus (Default). Beispiel: --auth-pause 5m")
+    ap.add_argument("--auth-pause-threshold", type=int, default=3,
+                    help="Auth-Fails im Fenster bis Pause triggert (Default: 3)")
+    ap.add_argument("--auth-pause-window", type=parse_duration, default=60,
+                    help="Fenster fuer Auth-Fails (Default: 60s, z.B. 60, 2m)")
+    ap.add_argument("--auth-pause-retries", type=int, default=1,
+                    help="Retries pro Paar nach Pause (Default: 1)")
     return ap.parse_args()
 
 
