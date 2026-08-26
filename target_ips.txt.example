@@ -1,0 +1,18 @@
+# target_ips.txt.example - Liste der ZIEL-IPs fuer ssh_matrix.py
+# Kopieren nach target_ips.txt und anpassen. Zusammen mit start_ips.txt
+# verwenden statt --ips: getestet werden Paare start -> ziel plus ziel -> ziel.
+#
+# Gleiche Formate wie ips.txt:
+#   <IP>                     -> Port 22 (Default)
+#   <IP>:<PORT>              -> abweichender SSH-Port
+#   <IP>/<CIDR>              -> ganzes Subnetz expandieren (Port 22)
+#   <IP>/<CIDR>:<PORT>       -> Subnetz mit abweichendem Port
+#   <IP1>-<IP2>              -> IP-Range (Port 22)
+#   <IP1>-<IP2>:<PORT>       -> IP-Range mit abweichendem Port
+#
+# Optional: Label am Zeilenende nach " # ". Kommentare beginnen mit "#".
+#
+# Beispiel:
+# 10.20.0.5
+# 10.20.0.12:2222           # abweichender Port
+# 10.20.1.0/24              # Subnetz expandieren

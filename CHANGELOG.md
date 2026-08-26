@@ -5,6 +5,40 @@ Alle nennenswerten Änderungen am SSH-Matrix-Tester.
 Das Format folgt [Keep a Changelog](https://keepachangelog.com/de/1.1.0/).
 Dieses Projekt verwendet [Semantic Versioning](https://semver.org/lang/de/).
 
+## [v2.2.2] (2026-08-26) — Gezielte Tests: auch Ziele untereinander
+
+### Geändert
+- **`--start-ips`/`--target-ips` testen jetzt zusätzlich `ziel → ziel`**:
+  Bisher wurden nur Paare `start → ziel` getestet. Jetzt werden die
+  Ziel-IPs zusätzlich untereinander geprüft (Self-Paare übersprungen).
+  Reihenfolge: zuerst alle Paare `start → ziel`, danach `ziel → ziel`;
+  `--limit-pairs`, Resume/Retry und Subnetz-Quota gelten unverändert.
+  Die Ziel-IPs werden dadurch auch als Quelle verbunden (der v2.2.1-Fix,
+  Ziel-only-Hosts gar nicht zu verbinden, gilt nur noch für die
+  ziel→ziel-Tests selbst).
+
+## [v2.2.1] (2026-08-26) — Matrix-Modus: keine unnötigen Quell-Verbindungen
+
+### Behoben
+- **`--start-ips`/`--target-ips`: Ziel-only-Hosts wurden trotzdem als Quelle
+  verbunden** (paramiko Kali→A) und im Log als „Quelle … verbunden“ bzw. mit
+  „nicht erreichbar“-Warnung geführt, obwohl sie nie Quell-Host sind. Jetzt
+  werden nur noch echte Start-IPs verbunden und getestet (Reihenfolge
+  weiterhin IP-sortiert). Spürbar schneller, wenn die Ziel-Liste viel größer
+  als die Start-Liste ist.
+
+## [v2.2.0] (2026-08-25) — Gezielte Tests: Start-Liste → Ziel-Liste
+
+### Hinzugefügt
+- **`--start-ips FILE` / `--target-ips FILE`**: Statt `--ips` können jetzt
+  getrennte Listen für Quell- und Ziel-IPs übergeben werden. Getestet werden
+  nur Paare `start → ziel` (eine Richtung, Self-Paare übersprungen), z. B.
+  `--start-ips start.txt --target-ips ziele.txt`. Gleiche Formate wie
+  `--ips` (CIDR/Range/Port/Label). Resume/Retry/Subnetz-Quota/
+  `--limit-pairs` funktionieren unverändert; `--ips` bleibt für die
+  Voll-Matrix (alle Paare, beide Richtungen) erhalten. Beide Modi sind
+  exklusiv (Mischung = Fehler).
+
 ## [v2.1.1] (2026-08-21) — Pfad-Sheets farbig
 
 ### Hinzugefügt

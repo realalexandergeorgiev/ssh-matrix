@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ssh_matrix.py - Testet fuer alle geordneten IP-Paare, ob Quelle A per SSH-Login
-Ziel B erreichen kann (gleiche Credentials ueberall).
+ssh_matrix.py - Testet fuer (optional ausgewaehlte) IP-Paare, ob Quelle A per
+SSH-Login Ziel B erreichen kann (gleiche Credentials ueberall).
+
+Zwei Modi:
+  1. --ips LISTE                  : Voll-Matrix - alle geordneten Paare
+                                    (A != B), beide Richtungen.
+  2. --start-ips S --target-ips T : Gezielt - Paare start -> ziel plus
+                                     ziel -> ziel (Self-Paare uebersprungen).
 
 Ablauf:
   1. Kali -> A  : paramiko (User/Passwort) - persistente Verbindung pro Quelle,
@@ -57,7 +63,7 @@ KNOWN_STATUSES = {
 RETRY_ALL_EXCLUDE = {"auth_ok", "skipped"}
 SUCCESS_STATUSES = {"auth_ok"}
 
-VERSION = "v2.1.1"
+VERSION = "v2.2.2"
 AUTHOR = "Alex & DeepSeek"
 
 # RAM-Warnschwelle in MB (per env ueberschreibbar, z.B. fuer Tests).
@@ -459,6 +465,22 @@ def parse_ips_file(path: str, default_port: int, log) -> list:
                     continue
                 seen.add(key)
                 hosts.append(h)
+    hosts.sort(key=lambda h: (ipaddress.IPv4Address(h["ip"]).packed, h["port"]))
+    return hosts
+
+
+def merge_host_lists(lists: list) -> list:
+    """Deduplizierte, sortierte Vereinigung mehrerer Host-Listen
+    (fuer --start-ips + --target-ips: Union als Basis der id_of-Map)."""
+    seen: set = set()
+    hosts: list = []
+    for hl in lists:
+        for h in hl:
+            key = (h["ip"], h["port"])
+            if key in seen:
+                continue
+            seen.add(key)
+            hosts.append(h)
     hosts.sort(key=lambda h: (ipaddress.IPv4Address(h["ip"]).packed, h["port"]))
     return hosts
 
@@ -915,6 +937,42 @@ def build_in_scope(n: int, limit: int):
             bits.set(a, b)
             count += 1
     return bits
+
+
+def build_matrix_scope(n: int, start_ids: set, target_ids: set, limit: int):
+    """Bitmap fuer Paare start -> ziel und zusaetzlich ziel -> ziel (a-, dann
+    b-Reihenfolge, Self-Paare uebersprungen). Liefert (bits, anzahl_paare):
+    bits ist nie None (Scope != 'alle Paare'), anzahl ist ggf. durch
+    --limit-pairs gekappt (zuerst start -> ziel, dann ziel -> ziel)."""
+    bits = PairBits(n)
+    count = 0
+    for a in range(n):
+        if a not in start_ids:
+            continue
+        for b in range(n):
+            if b not in target_ids:
+                continue
+            if a == b:
+                continue
+            if limit > 0 and count >= limit:
+                return bits, count
+            bits.set(a, b)
+            count += 1
+    for a in range(n):
+        if a not in target_ids:
+            continue
+        for b in range(n):
+            if b not in target_ids:
+                continue
+            if a == b:
+                continue
+            if bits.get(a, b):
+                continue
+            if limit > 0 and count >= limit:
+                return bits, count
+            bits.set(a, b)
+            count += 1
+    return bits, count
 
 
 def stream_detail(detail_path: str, id_of: dict, n: int, in_scope, done_bits,
@@ -1487,8 +1545,18 @@ def parse_args():
     ap.add_argument("--force", action="store_true",
                     help="RAM-Warnung (Schaetzung ueber Schwelle, Default 1 GB) "
                          "ohne Nachfrage ueberschreiben")
-    ap.add_argument("--ips", required=True,
-                    help="Pfad zur IP-Liste (Format siehe README / ips.txt.example)")
+    ap.add_argument("--ips",
+                    help="Pfad zur IP-Liste (Format siehe README / ips.txt.example). "
+                         "Voll-Matrix: alle geordneten Paare, beide Richtungen. "
+                         "Alternative: --start-ips + --target-ips")
+    ap.add_argument("--start-ips", default=None,
+                    help="Pfad zur Liste der Quell-IPs (nur zusammen mit "
+                         "--target-ips, statt --ips): testet Paare "
+                         "start -> ziel plus ziel -> ziel")
+    ap.add_argument("--target-ips", default=None,
+                    help="Pfad zur Liste der Ziel-IPs (nur zusammen mit "
+                         "--start-ips, statt --ips): testet Paare "
+                         "start -> ziel plus ziel -> ziel")
     ap.add_argument("--user", required=True, help="SSH-User (gilt fuer alle IPs)")
     pw = ap.add_mutually_exclusive_group(required=True)
     pw.add_argument("--pass-env", default=None,
@@ -1586,6 +1654,23 @@ def resolve_password(args) -> str:
 
 def main():
     args = parse_args()
+
+    # IP-Modus validieren: entweder --ips (Voll-Matrix) ODER
+    # --start-ips + --target-ips (gezielt), nie gemischt.
+    if args.start_ips or args.target_ips:
+        if args.ips:
+            print("FEHLER: --ips kann nicht zusammen mit --start-ips/--target-ips "
+                  "verwendet werden.", file=sys.stderr)
+            sys.exit(2)
+        if not args.start_ips or not args.target_ips:
+            print("FEHLER: --start-ips und --target-ips muessen zusammen "
+                  "angegeben werden.", file=sys.stderr)
+            sys.exit(2)
+    elif not args.ips:
+        print("FEHLER: entweder --ips oder --start-ips UND --target-ips angeben.",
+              file=sys.stderr)
+        sys.exit(2)
+
     password = resolve_password(args)
 
     os.makedirs(args.out, exist_ok=True)
@@ -1629,10 +1714,26 @@ def main():
     log.info("SSH-Matrix-Tester %s - entwickelt von %s (verbose=%s, tui=%s)",
              VERSION, AUTHOR, args.verbose, use_tui)
 
-    hosts = parse_ips_file(args.ips, args.port_default, log)
-    if not hosts:
-        log.error("Keine gueltigen IPs in %s gefunden", args.ips)
-        sys.exit(1)
+    matrix_mode = bool(args.start_ips and args.target_ips)
+    if matrix_mode:
+        start_hosts = parse_ips_file(args.start_ips, args.port_default, log)
+        target_hosts = parse_ips_file(args.target_ips, args.port_default, log)
+        if not start_hosts:
+            log.error("Keine gueltigen IPs in %s gefunden", args.start_ips)
+            sys.exit(1)
+        if not target_hosts:
+            log.error("Keine gueltigen IPs in %s gefunden", args.target_ips)
+            sys.exit(1)
+        hosts = merge_host_lists([start_hosts, target_hosts])
+        log.info("%d Start-Endpunkte (%s), %d Ziel-Endpunkte (%s) "
+                 "(getestet: start -> ziel plus ziel -> ziel)",
+                 len(start_hosts), args.start_ips, len(target_hosts),
+                 args.target_ips)
+    else:
+        hosts = parse_ips_file(args.ips, args.port_default, log)
+        if not hosts:
+            log.error("Keine gueltigen IPs in %s gefunden", args.ips)
+            sys.exit(1)
     cluster_subnets(hosts, args.subnet_gap)
     nets = sorted(set(h["net"] for h in hosts))
     log.info("%d Endpunkte geladen, %d Subnetze (gap=%d)", len(hosts), len(nets),
@@ -1646,8 +1747,25 @@ def main():
 
     n = len(hosts)
     id_of = {(h["ip"], h["port"]): i for i, h in enumerate(hosts)}
-    all_pairs = n * (n - 1)
-    log.info("%d geordnete Paare (beide Richtungen)", all_pairs)
+
+    if matrix_mode:
+        start_ids = {id_of[(h["ip"], h["port"])] for h in start_hosts}
+        target_ids = {id_of[(h["ip"], h["port"])] for h in target_hosts}
+        scope_bits, all_pairs = build_matrix_scope(
+            n, start_ids, target_ids, args.limit_pairs)
+        log.info("%d geordnete Paare (start -> ziel plus ziel -> ziel, "
+                 "self-Paare uebersprungen)", all_pairs)
+        if args.limit_pairs and args.limit_pairs < all_pairs:
+            log.info("--limit-pairs: teste nur %d Paare", args.limit_pairs)
+        total = all_pairs
+    else:
+        all_pairs = n * (n - 1)
+        log.info("%d geordnete Paare (beide Richtungen)", all_pairs)
+        total = all_pairs
+        if args.limit_pairs and 0 < args.limit_pairs < total:
+            total = args.limit_pairs
+            log.info("--limit-pairs: teste nur %d Paare", total)
+        scope_bits = build_in_scope(n, args.limit_pairs)
 
     # Retry-Flags auswerten (implizieren Resume).
     retry_statuses = None
@@ -1681,12 +1799,6 @@ def main():
 
     detail_path = os.path.join(args.out, "detail.csv")
 
-    total = all_pairs
-    if args.limit_pairs and 0 < args.limit_pairs < total:
-        total = args.limit_pairs
-        log.info("--limit-pairs: teste nur %d Paare", total)
-    scope_bits = build_in_scope(n, args.limit_pairs)
-
     direction_working = defaultdict(set)  # (src_net, tgt_net) -> Quell-IPs (auf quota gekappt)
 
     if retry_statuses:
@@ -1719,6 +1831,8 @@ def main():
 
     tasks = []
     for src_id in range(n):
+        if matrix_mode and src_id not in start_ids and src_id not in target_ids:
+            continue
         for (start, end) in id_chunks(n, args.per_source):
             tasks.append((src_id, (start, end)))
 

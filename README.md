@@ -1,11 +1,15 @@
 # SSH-Matrix-Tester
 
-**Version v2.0.7** — entwickelt von **Alex & DeepSeek**.
+**Version v2.2.2** — entwickelt von **Alex & DeepSeek**.
 
-Testet für alle geordneten IP-Paare, ob **Quelle A einen vollen SSH-Login auf
-Ziel B aufbauen kann** – mit denselben Credentials (User/Passwort) auf allen
-Hosts. Es werden **beide Richtungen** getestet (A→B und B→A sind je ein
-eigener Test).
+Testet für (optional ausgewählte) IP-Paare, ob **Quelle A einen vollen
+SSH-Login auf Ziel B aufbauen kann** – mit denselben Credentials
+(User/Passwort) auf allen Hosts. Zwei Modi:
+
+- **`--ips`** (Voll-Matrix): alle geordneten Paare, **beide Richtungen**
+  (A→B und B→A sind je ein eigener Test).
+- **`--start-ips` + `--target-ips`** (gezielt): Paare **start → ziel** plus
+  **ziel → ziel** (Ziele untereinander).
 
 ## Features
 
@@ -190,6 +194,36 @@ die nicht mehr in `ips.txt` stehen, bleiben unangetastet. Kombinierbar mit
 neuen IPs (s. o.): neue Paare werden ohnehin getestet, alte Fehlversuche per
 `--retry-status` zusätzlich. Danach wie immer den Report neu bauen.
 
+### Gezielte Tests: Start-Liste → Ziel-Liste (seit v2.2.0)
+
+Statt der Voll-Matrix (`--ips`, alle Paare in beiden Richtungen) können
+getrennte Listen für **Quell-IPs** und **Ziel-IPs** übergeben werden. Getestet
+werden Paare **start → ziel** und zusätzlich **ziel → ziel** (die Ziel-IPs
+untereinander; Self-Paare übersprungen) – z. B. wenn geprüft werden soll, von
+welchen bekannten Quellen aus bestimmte Ziele erreichbar sind und wie die
+Ziele untereinander vernetzt sind:
+
+```bash
+# start_ips.txt und target_ips.txt anlegen (Format wie ips.txt, s. Abschnitt 3)
+cp start_ips.txt.example start_ips.txt
+cp target_ips.txt.example target_ips.txt
+
+python3 ssh_matrix.py --start-ips start_ips.txt --target-ips target_ips.txt \
+    --user meinuser --pass-env SSHPASS --out ssh_matrix_out
+```
+
+- Beide Listen müssen zusammen angegeben werden; `--ips` und
+  `--start-ips`/`--target-ips` sind exklusiv.
+- Alle anderen Optionen funktionieren wie gehabt: `--resume`,
+  `--retry-status`, `--subnet-quota`, `--limit-pairs`, `--workers`, …
+- Der Fortschritt/`total` zählt nur die tatsächlich erlaubten Paare
+  (`|start| × |ziel|` abzüglich Self-Paare, plus `|ziel| × (|ziel|-1)`
+  für die Ziel-Paare untereinander).
+- **Reihenfolge**: Als Quelle werden die Start-IPs und zusätzlich die
+  Ziel-IPs verbunden (für die Tests ziel → ziel); sie werden wie im
+  `--ips`-Modus **IP-sortiert** abgearbeitet (nicht Datei-Reihenfolge).
+  Zuerst werden alle Paare start → ziel getestet, danach ziel → ziel.
+
 ---
 
 ## 3. IP-Listen-Format (`ips.txt`)
@@ -221,7 +255,9 @@ A auf A's Port; von A aus wird B auf B's Port getestet (`ssh -p <B_port>`).
 
 | Argument | Default | Bedeutung |
 |---|---|---|
-| `--ips FILE` | – (Pflicht) | IP-Liste (siehe Abschnitt 3) |
+| `--ips FILE` | – (einer von beiden Modi) | IP-Liste, Voll-Matrix: alle geordneten Paare, beide Richtungen (siehe Abschnitt 3) |
+| `--start-ips FILE` | – | Quell-IP-Liste für gezielte Tests (nur zusammen mit `--target-ips`, statt `--ips`): testet Paare start → ziel plus ziel → ziel |
+| `--target-ips FILE` | – | Ziel-IP-Liste für gezielte Tests (nur zusammen mit `--start-ips`, statt `--ips`): testet Paare start → ziel plus ziel → ziel |
 | `--user USER` | – (Pflicht) | SSH-User, gilt für alle IPs |
 | `--pass-env NAME` | `SSHPASS` | Env-Variable mit Passwort (empfohlen) |
 | `--pass-file FILE` | – | Datei, 1. Zeile = Passwort (Alternative) |
@@ -314,6 +350,10 @@ die Vorschläge; `pfade.csv`/`netz_pfade.csv` als Export.
 **Beide Richtungen** entstehen automatisch, weil alle geordneten Paare
 getestet werden. `direction` in `detail.csv` ist daher immer `forward` –
 Hin und Zurück sind zwei Zeilen mit vertauschten `source`/`target`.
+
+Mit **`--start-ips`/`--target-ips`** werden Paare **start → ziel** und
+zusätzlich **ziel → ziel** getestet; Self-Paare (gleiche IP+Port in beiden
+Listen) werden übersprungen.
 
 ### Subnetz-Quota (schneller testen)
 
